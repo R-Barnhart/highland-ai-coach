@@ -1,15 +1,17 @@
 import streamlit as st
 import cv2
-import mediapipe as mp
 import numpy as np
 import tempfile
 import time
 from fpdf import FPDF
 from datetime import datetime
+from mediapipe.tasks.python import vision
+from mediapipe.tasks.python.vision import PoseLandmarker, PoseLandmarkerOptions
+from mediapipe.tasks.python.core.base_options import BaseOptions
+import plotly.graph_objects as go
 
 # --- 1. FRONTEND CONFIGURATION ---
 st.set_page_config(page_title="Highland Games AI Lab", layout="wide", page_icon="🛡️")
-
 st.markdown("""
     <style>
     .main { background-color: #0E1117; color: #FFFFFF; }
@@ -17,19 +19,9 @@ st.markdown("""
     .stButton>button { width: 100%; background-color: #FF4B4B; color: white; font-weight: bold; border: none; }
     .report-box { padding: 20px; border: 1px solid #333; border-radius: 10px; background-color: #1A1C24; }
     </style>
-    """, unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
-# --- 2. AI & PHYSICS SETUP ---
-from mediapipe.python.solutions import pose as mp_pose
-from mediapipe.python.solutions import drawing_utils as mp_drawing
-
-pose = mp_pose.Pose(
-    static_image_mode=False,
-    model_complexity=1,
-    min_detection_confidence=0.7,
-    min_tracking_confidence=0.7
-)
-
+# --- 2. EVENT PROFILES ---
 EVENT_PROFILES = {
     "Hammer (Light/Heavy)": {"ideal": (38, 44), "tip": "Maximize orbit! Keep arms fully extended during the winds."},
     "WOB (Weight for Height)": {"ideal": (75, 88), "tip": "Vertical drive! Don't let the weight pull your chest down."},
@@ -40,6 +32,7 @@ EVENT_PROFILES = {
     "Braemar Stone": {"ideal": (39, 45), "tip": "Leg drive! Keep the stone tucked until the final extension."}
 }
 
+# --- 3. HELPER FUNCTIONS ---
 def calculate_angle(a, b, c):
     a, b, c = np.array(a), np.array(b), np.array(c)
     rad = np.arctan2(c[1]-b[1], c[0]-b[0]) - np.arctan2(a[1]-b[1], a[0]-b[0])
@@ -66,7 +59,7 @@ def create_pdf(event, angle, status, tip):
     pdf.multi_cell(0, 10, txt=f"Coach's Feedback: {tip}")
     return pdf.output(dest='S').encode('latin-1')
 
-# --- 4. MAIN APP INTERFACE ---
+# --- 4. APP INTERFACE ---
 with st.sidebar:
     st.title("🛡️ Coach's Panel")
     event_choice = st.selectbox("Select Event", list(EVENT_PROFILES.keys()))
@@ -74,75 +67,96 @@ with st.sidebar:
     st.divider()
 
 st.title("Highland Games AI Performance Lab")
-u_user = st.file_uploader("Upload Your Throw", type=["mp4", "mov"])
+u_user = st.file_uploader("Upload Your Throw", type=["mp4","mov"])
 
 if u_user:
     t_u = tempfile.NamedTemporaryFile(delete=False)
     t_u.write(u_user.read())
 
-    col_vid, col_data = st.columns([2, 1])
+    col_vid, col_data = st.columns([2,1])
+    timeline_frames, angles = [], []
+    peak_angle, peak_frame, peak_frame_idx = 0, None, 0
 
-    with col_vid:
-        if st.button("🚀 Analyze Form"):
-            cap = cv2.VideoCapture(t_u.name)
-            st_vid = st.empty()
-            peak_angle, peak_frame = 0, None
+    if st.button("🚀 Analyze Form"):
+        cap = cv2.VideoCapture(t_u.name)
+        st_vid = st.empty()
+        frame_idx = 0
 
-            # --- Set up progress bar ---
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            progress_bar = st.progress(0)
-            frame_count = 0
+        # --- POSE LANDMARKER SETUP ---
+        pose_landmarker_options = PoseLandmarkerOptions(
+            base_options=BaseOptions(model_asset_path="pose_landmarker_lite.task"),
+            running_mode=vision.RunningMode.VIDEO
+        )
+        pose_landmarker = PoseLandmarker.create(pose_landmarker_options)
 
-            while cap.isOpened():
-                ret, frame = cap.read()
-                if not ret or frame is None:
-                    break
+        # --- PROCESS VIDEO ---
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret: break
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                if rgb is None or rgb.size == 0:
-                    continue
+            result = pose_landmarker.detect_for_video(rgb, frame_idx)
+            lm = result.pose_landmarks[0].landmarks if result.pose_landmarks else None
 
-                results = pose.process(rgb)
+            if lm:
+                s,h,k = [(lm[12].x, lm[12].y), (lm[24].x, lm[24].y), (lm[26].x, lm[26].y)]
+                ang = calculate_angle(s,h,k)
+                angles.append(ang)
+                if ang > peak_angle:
+                    peak_angle = ang
+                    peak_frame = frame.copy()
+                    peak_frame_idx = frame_idx
+            else:
+                angles.append(0)
 
-                if results.pose_landmarks:
-                    mp_drawing.draw_landmarks(frame, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
-                    lm = results.pose_landmarks.landmark
-                    s, h, k = [lm[12].x, lm[12].y], [lm[24].x, lm[24].y], [lm[26].x, lm[26].y]
-                    ang = calculate_angle(s, h, k)
-                    if ang > peak_angle:
-                        peak_angle, peak_frame = ang, frame.copy()
+            timeline_frames.append(frame.copy())
+            frame_idx += 1
+        cap.release()
 
-                st_vid.image(frame, channels="BGR", use_container_width=True)
-                time.sleep(0.03 / play_speed)
+        # --- TIMELINE SLIDER AND PLAYBACK ---
+        st.subheader("📊 Video Timeline")
+        slider_frame = st.slider("Move along video", 0, len(timeline_frames)-1, 0, key="timeline")
+        st_vid.image(timeline_frames[slider_frame], channels="BGR", use_container_width=True)
+        st.write(f"Frame {slider_frame} / Peak at {peak_frame_idx} (Red)")
 
-                # --- Update progress bar ---
-                frame_count += 1
-                if total_frames > 0:
-                    progress_bar.progress(min(frame_count / total_frames, 1.0))
+        play_btn = st.button("▶️ Play")
+        if play_btn:
+            for i in range(slider_frame, len(timeline_frames)):
+                st.session_state.timeline = i
+                st_vid.image(timeline_frames[i], channels="BGR", use_container_width=True)
+                time.sleep(0.03/play_speed)
 
-            cap.release()
-            progress_bar.empty()  # Clear progress bar after processing
+        # --- ANGLE PLOT ---
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(y=angles, mode="lines", line=dict(color="white"), showlegend=False))
+        fig.add_trace(go.Scatter(
+            x=[peak_frame_idx], y=[peak_angle],
+            mode="markers", marker=dict(color="red", size=12),
+            name="Peak Angle"
+        ))
+        fig.update_layout(
+            xaxis_title="Frame", yaxis_title="Hip Angle",
+            plot_bgcolor="#0E1117", paper_bgcolor="#0E1117",
+            font=dict(color="white")
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
-            # --- DATA DASHBOARD ---
-            with col_data:
-                st.subheader("Session Results")
-                st.metric("Peak Angle", f"{int(peak_angle)}°")
+        # --- DATA DASHBOARD ---
+        with col_data:
+            st.subheader("Session Results")
+            st.metric("Peak Angle", f"{int(peak_angle)}°")
+            low, high = EVENT_PROFILES[event_choice]["ideal"]
+            status = "OPTIMAL" if low <= peak_angle <= high else "ADJUSTMENT NEEDED"
+            st.write(f"**Status:** {status}")
+            st.info(f"**Tip:** {EVENT_PROFILES[event_choice]['tip']}")
 
-                low, high = EVENT_PROFILES[event_choice]["ideal"]
-                status = "OPTIMAL" if low <= peak_angle <= high else "ADJUSTMENT NEEDED"
+            if peak_frame is not None:
+                st.image(peak_frame, channels="BGR", caption="Moment of Peak Power")
 
-                st.write(f"**Status:** {status}")
-                st.info(f"**Tip:** {EVENT_PROFILES[event_choice]['tip']}")
-
-                if peak_frame is not None:
-                    st.image(peak_frame, channels="BGR", caption="Moment of Peak Power")
-
-                pdf_bytes = create_pdf(event_choice, peak_angle, status, EVENT_PROFILES[event_choice]['tip'])
-                st.download_button(
-                    label="📥 Download Performance Report",
-                    data=pdf_bytes,
-                    file_name=f"Highland_Report_{event_choice.replace(' ', '_')}.pdf",
-                    mime="application/pdf"
-                )
-
-
+            pdf_bytes = create_pdf(event_choice, peak_angle, status, EVENT_PROFILES[event_choice]['tip'])
+            st.download_button(
+                label="📥 Download Performance Report",
+                data=pdf_bytes,
+                file_name=f"Highland_Report_{event_choice.replace(' ','_')}.pdf",
+                mime="application/pdf"
+            )
