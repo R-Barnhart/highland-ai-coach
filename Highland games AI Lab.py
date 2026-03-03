@@ -23,6 +23,7 @@ st.markdown("""
 from mediapipe.tasks.python import vision
 from mediapipe.tasks.python.vision import PoseLandmarker, PoseLandmarkerOptions
 from mediapipe.tasks.python.core.base_options import BaseOptions
+from mediapipe.python.solutions import pose as mp_pose
 
 EVENT_PROFILES = {
     "Hammer (Light/Heavy)": {"ideal": (38, 44), "tip": "Maximize orbit! Keep arms fully extended during the winds."},
@@ -122,3 +123,4 @@ if u_user:
                     mime="application/pdf"
 
                 )
+
