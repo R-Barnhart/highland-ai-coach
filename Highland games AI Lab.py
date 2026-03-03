@@ -20,9 +20,9 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 # --- 2. AI & PHYSICS SETUP ---
-mp_pose = mp.solutions.pose
-pose = mp_pose.Pose(min_detection_confidence=0.7, min_tracking_confidence=0.7)
-mp_drawing = mp.solutions.drawing_utils
+from mediapipe.tasks.python import vision
+from mediapipe.tasks.python.vision import PoseLandmarker, PoseLandmarkerOptions
+from mediapipe.tasks.python.core.base_options import BaseOptions
 
 EVENT_PROFILES = {
     "Hammer (Light/Heavy)": {"ideal": (38, 44), "tip": "Maximize orbit! Keep arms fully extended during the winds."},
@@ -120,4 +120,5 @@ if u_user:
                     data=pdf_bytes,
                     file_name=f"Highland_Report_{event_choice.replace(' ', '_')}.pdf",
                     mime="application/pdf"
+
                 )
