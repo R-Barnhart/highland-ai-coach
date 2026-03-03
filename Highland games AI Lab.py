@@ -19,12 +19,19 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. AI & PHYSICS SETUP ---
-from mediapipe.tasks.python import vision
-from mediapipe.tasks.python.vision import PoseLandmarker, PoseLandmarkerOptions
-from mediapipe.tasks.python.core.base_options import BaseOptions
+# --- 2. AI & PHYSICS SETUP (Classic Solutions API) ---
+from mediapipe.python.solutions import pose as mp_pose
+from mediapipe.python.solutions import drawing_utils as mp_drawing
 
+# Initialize MediaPipe Pose
+pose = mp_pose.Pose(
+    static_image_mode=False,
+    model_complexity=1,
+    min_detection_confidence=0.7,
+    min_tracking_confidence=0.7
+)
 
+# Event profiles
 EVENT_PROFILES = {
     "Hammer (Light/Heavy)": {"ideal": (38, 44), "tip": "Maximize orbit! Keep arms fully extended during the winds."},
     "WOB (Weight for Height)": {"ideal": (75, 88), "tip": "Vertical drive! Don't let the weight pull your chest down."},
@@ -35,13 +42,14 @@ EVENT_PROFILES = {
     "Braemar Stone": {"ideal": (39, 45), "tip": "Leg drive! Keep the stone tucked until the final extension."}
 }
 
+# --- Angle Calculation ---
 def calculate_angle(a, b, c):
     a, b, c = np.array(a), np.array(b), np.array(c)
     rad = np.arctan2(c[1]-b[1], c[0]-b[0]) - np.arctan2(a[1]-b[1], a[0]-b[0])
     angle = np.abs(rad*180.0/np.pi)
     return 360 - angle if angle > 180 else angle
 
-# --- 3. PDF GENERATOR ---
+# --- PDF GENERATOR ---
 def create_pdf(event, angle, status, tip):
     pdf = FPDF()
     pdf.add_page()
@@ -75,42 +83,48 @@ u_user = st.file_uploader("Upload Your Throw", type=["mp4", "mov"])
 if u_user:
     t_u = tempfile.NamedTemporaryFile(delete=False)
     t_u.write(u_user.read())
-   
+
     col_vid, col_data = st.columns([2, 1])
-   
+
     with col_vid:
         if st.button("🚀 Analyze Form"):
             cap = cv2.VideoCapture(t_u.name)
             st_vid = st.empty()
             peak_angle, peak_frame = 0, None
-           
+
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret: break
+
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                res = pose.process(rgb)
-                if res.pose_landmarks:
-                    mp_drawing.draw_landmarks(frame, res.pose_landmarks, mp_pose.POSE_CONNECTIONS)
-                    lm = res.pose_landmarks.landmark
+                results = pose.process(rgb)
+
+                if results.pose_landmarks:
+                    mp_drawing.draw_landmarks(frame, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
+
+                    # Get hip-knee-shoulder landmarks
+                    lm = results.pose_landmarks.landmark
                     s, h, k = [lm[12].x, lm[12].y], [lm[24].x, lm[24].y], [lm[26].x, lm[26].y]
                     ang = calculate_angle(s, h, k)
                     if ang > peak_angle:
                         peak_angle, peak_frame = ang, frame.copy()
+
                 st_vid.image(frame, channels="BGR", use_container_width=True)
                 time.sleep(0.03 / play_speed)
+
             cap.release()
 
             # --- DATA DASHBOARD ---
             with col_data:
                 st.subheader("Session Results")
                 st.metric("Peak Angle", f"{int(peak_angle)}°")
-               
+
                 low, high = EVENT_PROFILES[event_choice]["ideal"]
                 status = "OPTIMAL" if low <= peak_angle <= high else "ADJUSTMENT NEEDED"
-               
+
                 st.write(f"**Status:** {status}")
                 st.info(f"**Tip:** {EVENT_PROFILES[event_choice]['tip']}")
-               
+
                 if peak_frame is not None:
                     st.image(peak_frame, channels="BGR", caption="Moment of Peak Power")
 
@@ -121,7 +135,6 @@ if u_user:
                     data=pdf_bytes,
                     file_name=f"Highland_Report_{event_choice.replace(' ', '_')}.pdf",
                     mime="application/pdf"
-
                 )
 
 
