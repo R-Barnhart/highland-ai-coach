@@ -19,11 +19,10 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. AI & PHYSICS SETUP (Classic Solutions API) ---
+# --- 2. AI & PHYSICS SETUP ---
 from mediapipe.python.solutions import pose as mp_pose
 from mediapipe.python.solutions import drawing_utils as mp_drawing
 
-# Initialize MediaPipe Pose
 pose = mp_pose.Pose(
     static_image_mode=False,
     model_complexity=1,
@@ -31,7 +30,6 @@ pose = mp_pose.Pose(
     min_tracking_confidence=0.7
 )
 
-# Event profiles
 EVENT_PROFILES = {
     "Hammer (Light/Heavy)": {"ideal": (38, 44), "tip": "Maximize orbit! Keep arms fully extended during the winds."},
     "WOB (Weight for Height)": {"ideal": (75, 88), "tip": "Vertical drive! Don't let the weight pull your chest down."},
@@ -42,14 +40,12 @@ EVENT_PROFILES = {
     "Braemar Stone": {"ideal": (39, 45), "tip": "Leg drive! Keep the stone tucked until the final extension."}
 }
 
-# --- Angle Calculation ---
 def calculate_angle(a, b, c):
     a, b, c = np.array(a), np.array(b), np.array(c)
     rad = np.arctan2(c[1]-b[1], c[0]-b[0]) - np.arctan2(a[1]-b[1], a[0]-b[0])
     angle = np.abs(rad*180.0/np.pi)
     return 360 - angle if angle > 180 else angle
 
-# --- PDF GENERATOR ---
 def create_pdf(event, angle, status, tip):
     pdf = FPDF()
     pdf.add_page()
@@ -92,17 +88,24 @@ if u_user:
             st_vid = st.empty()
             peak_angle, peak_frame = 0, None
 
+            # --- Set up progress bar ---
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            progress_bar = st.progress(0)
+            frame_count = 0
+
             while cap.isOpened():
                 ret, frame = cap.read()
-                if not ret: break
+                if not ret or frame is None:
+                    break
 
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                if rgb is None or rgb.size == 0:
+                    continue
+
                 results = pose.process(rgb)
 
                 if results.pose_landmarks:
                     mp_drawing.draw_landmarks(frame, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
-
-                    # Get hip-knee-shoulder landmarks
                     lm = results.pose_landmarks.landmark
                     s, h, k = [lm[12].x, lm[12].y], [lm[24].x, lm[24].y], [lm[26].x, lm[26].y]
                     ang = calculate_angle(s, h, k)
@@ -112,7 +115,13 @@ if u_user:
                 st_vid.image(frame, channels="BGR", use_container_width=True)
                 time.sleep(0.03 / play_speed)
 
+                # --- Update progress bar ---
+                frame_count += 1
+                if total_frames > 0:
+                    progress_bar.progress(min(frame_count / total_frames, 1.0))
+
             cap.release()
+            progress_bar.empty()  # Clear progress bar after processing
 
             # --- DATA DASHBOARD ---
             with col_data:
@@ -128,7 +137,6 @@ if u_user:
                 if peak_frame is not None:
                     st.image(peak_frame, channels="BGR", caption="Moment of Peak Power")
 
-                # PDF DOWNLOAD
                 pdf_bytes = create_pdf(event_choice, peak_angle, status, EVENT_PROFILES[event_choice]['tip'])
                 st.download_button(
                     label="📥 Download Performance Report",
