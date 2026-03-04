@@ -1,5 +1,7 @@
 # Highland Games AI Lab - Streamlit App (Fixed for MediaPipe Tasks API)
 
+# Highland Games AI Lab - Streamlit App (Fixed for MediaPipe Tasks API)
+
 import streamlit as st
 import cv2
 import numpy as np
@@ -90,6 +92,5 @@ if uploaded_file:
 
     # --- 5. DISPLAY RESULTS ---
     st.subheader("Results")
-    st.metric("Peak Hip Angle", f"{int(peak_angle)}°")"application/pdf"
-        
+    st.metric("Peak Hip Angle", f"{int(peak_angle)}°")
 
