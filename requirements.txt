@@ -3,5 +3,6 @@ streamlit
 mediapipe==0.10.32
 fpdf
 numpy
+plotly>=5.0.0
 
 
