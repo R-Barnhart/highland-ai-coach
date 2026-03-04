@@ -22,15 +22,6 @@ st.set_page_config(
     page_icon="🛡️"
 )
 
-st.markdown("""
-<style>
-.main { background-color: #0E1117; color: #FFFFFF; }
-[data-testid="stMetricValue"] { color: #00FFCC !important; font-size: 42px; font-weight: bold; }
-.stButton>button { width: 100%; background-color: #FF4B4B; color: white; font-weight: bold; border: none; }
-</style>
-""", unsafe_allow_html=True)
-
-
 # ----------------------------
 # 2. EVENT CONFIG
 # ----------------------------
@@ -47,10 +38,6 @@ def calculate_angle(a, b, c):
     angle = np.abs(radians * 180.0 / np.pi)
     return 360 - angle if angle > 180 else angle
 
-
-# ----------------------------
-# 3. PDF GENERATOR
-# ----------------------------
 def create_pdf(event, angle, status, tip):
     pdf = FPDF()
     pdf.add_page()
@@ -68,7 +55,7 @@ def create_pdf(event, angle, status, tip):
 
 
 # ----------------------------
-# 4. SIDEBAR
+# 3. SIDEBAR
 # ----------------------------
 with st.sidebar:
     st.title("Coach Panel")
@@ -77,7 +64,7 @@ with st.sidebar:
 
 
 # ----------------------------
-# 5. INIT POSE LANDMARKER
+# 4. INIT POSE LANDMARKER
 # ----------------------------
 MODEL_PATH = "pose_landmarker_lite.task"
 
@@ -92,11 +79,16 @@ pose_landmarker = PoseLandmarker.create_from_options(pose_options)
 
 
 # ----------------------------
-# 6. MAIN APP
+# 5. MAIN APP
 # ----------------------------
 st.title("Highland Games AI Performance Lab")
 
 uploaded_file = st.file_uploader("Upload Throw Video", type=["mp4", "mov"])
+
+# ✅ DEFINE VARIABLES EARLY (Fixes NameError)
+peak_angle = 0
+peak_frame = None
+analysis_complete = False
 
 if uploaded_file:
     temp_file = tempfile.NamedTemporaryFile(delete=False)
@@ -109,9 +101,6 @@ if uploaded_file:
             cap = cv2.VideoCapture(temp_file.name)
             video_placeholder = st.empty()
 
-            peak_angle = 0
-            peak_frame = None
-
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret:
@@ -119,7 +108,6 @@ if uploaded_file:
 
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-                # ✅ REQUIRED mp.Image WRAP (FIX)
                 mp_image = mp.Image(
                     image_format=mp.ImageFormat.SRGB,
                     data=frame_rgb
@@ -134,7 +122,6 @@ if uploaded_file:
                     landmarks = [(lm.x, lm.y) for lm in result.pose_landmarks[0]]
                     h, w, _ = frame.shape
 
-                    # Draw connections
                     for connection in PoseLandmarker.POSE_CONNECTIONS:
                         start = landmarks[connection[0]]
                         end = landmarks[connection[1]]
@@ -147,7 +134,6 @@ if uploaded_file:
                             2
                         )
 
-                    # Right hip angle (shoulder-hip-knee)
                     shoulder = landmarks[12]
                     hip = landmarks[24]
                     knee = landmarks[26]
@@ -162,9 +148,10 @@ if uploaded_file:
                 time.sleep(0.03 / playback_speed)
 
             cap.release()
+            analysis_complete = True
 
     with col_data:
-        if peak_angle > 0:
+        if analysis_complete and peak_angle > 0:
             st.subheader("Results")
             st.metric("Peak Hip Angle", f"{int(peak_angle)}°")
 
@@ -190,4 +177,3 @@ if uploaded_file:
                 file_name="highland_report.pdf",
                 mime="application/pdf"
             )
-
