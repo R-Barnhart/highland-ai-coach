@@ -2,33 +2,19 @@ import streamlit as st
 import cv2
 import numpy as np
 import tempfile
-import time
 from fpdf import FPDF
 from datetime import datetime
 import mediapipe as mp
 
-# --- Mediapipe Tasks API ---
 from mediapipe.tasks.python import vision
 from mediapipe.tasks.python.vision import PoseLandmarker, PoseLandmarkerOptions
 from mediapipe.tasks.python.core.base_options import BaseOptions
 
 
-# ----------------------------
-# 1. PAGE CONFIG
-# ----------------------------
-st.set_page_config(
-    page_title="Highland Games AI Lab",
-    layout="wide",
-    page_icon="🛡️"
-)
-
+st.set_page_config(page_title="Highland Games AI Lab", layout="wide")
 st.title("Highland Games AI Performance Lab")
 
 
-# ----------------------------
-# 2. MANUAL POSE CONNECTIONS
-# (Tasks API does NOT provide POSE_CONNECTIONS)
-# ----------------------------
 POSE_CONNECTIONS = [
     (11,13),(13,15),(12,14),(14,16),
     (11,12),
@@ -38,10 +24,6 @@ POSE_CONNECTIONS = [
     (24,26),(26,28),(28,30),(30,32)
 ]
 
-
-# ----------------------------
-# 3. EVENT CONFIG
-# ----------------------------
 EVENT_PROFILES = {
     "Hammer": {"ideal": (38, 44), "tip": "Keep arms long and maximize orbit."},
     "WFD": {"ideal": (35, 42), "tip": "Drive through the trig with chest high."},
@@ -71,128 +53,105 @@ def create_pdf(event, angle, status, tip):
     return pdf.output(dest="S").encode("latin-1")
 
 
-# ----------------------------
-# 4. SIDEBAR
-# ----------------------------
 with st.sidebar:
-    st.header("My Coach Panel")
     event_choice = st.selectbox("Select Event", list(EVENT_PROFILES.keys()))
-    playback_speed = st.slider("Playback Speed", 0.25, 1.5, 1.0)
 
 
-# ----------------------------
-# 5. INIT POSE LANDMARKER
-# ----------------------------
 MODEL_PATH = "pose_landmarker_lite.task"
-
 base_options = BaseOptions(model_asset_path=MODEL_PATH)
-
 pose_options = PoseLandmarkerOptions(
     base_options=base_options,
     running_mode=vision.RunningMode.VIDEO
 )
-
 pose_landmarker = PoseLandmarker.create_from_options(pose_options)
 
 
-# ----------------------------
-# 6. MAIN VIDEO LOGIC
-# ----------------------------
 uploaded_file = st.file_uploader("Upload Throw Video", type=["mp4", "mov"])
 
-# ✅ Prevent NameError
-peak_angle = 0
-peak_frame = None
-analysis_complete = False
+if uploaded_file and st.button("Analyze Throw"):
 
-if uploaded_file:
-    temp_file = tempfile.NamedTemporaryFile(delete=False)
-    temp_file.write(uploaded_file.read())
+    input_temp = tempfile.NamedTemporaryFile(delete=False)
+    input_temp.write(uploaded_file.read())
 
-    col_video, col_data = st.columns([2, 1])
+    cap = cv2.VideoCapture(input_temp.name)
 
-    with col_video:
-        if st.button("Analyze Throw"):
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
 
-            cap = cv2.VideoCapture(temp_file.name)
-            video_placeholder = st.empty()
+    output_path = "processed_output.mp4"
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
-            while cap.isOpened():
-                ret, frame = cap.read()
-                if not ret:
-                    break
+    peak_angle = 0
+    peak_frame = None
 
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-                # ✅ REQUIRED mp.Image wrapper
-                mp_image = mp.Image(
-                    image_format=mp.ImageFormat.SRGB,
-                    data=frame_rgb
-                )
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-                result = pose_landmarker.detect_for_video(
-                    mp_image,
-                    timestamp_ms=int(cap.get(cv2.CAP_PROP_POS_MSEC))
-                )
+        mp_image = mp.Image(
+            image_format=mp.ImageFormat.SRGB,
+            data=frame_rgb
+        )
 
-                if result.pose_landmarks:
-                    landmarks = [(lm.x, lm.y) for lm in result.pose_landmarks[0]]
-                    h, w, _ = frame.shape
+        result = pose_landmarker.detect_for_video(
+            mp_image,
+            timestamp_ms=int(cap.get(cv2.CAP_PROP_POS_MSEC))
+        )
 
-                    # Draw skeleton manually
-                    for connection in POSE_CONNECTIONS:
-                        start = landmarks[connection[0]]
-                        end = landmarks[connection[1]]
+        if result.pose_landmarks:
+            landmarks = [(lm.x, lm.y) for lm in result.pose_landmarks[0]]
+            h, w, _ = frame.shape
 
-                        cv2.line(
-                            frame,
-                            (int(start[0] * w), int(start[1] * h)),
-                            (int(end[0] * w), int(end[1] * h)),
-                            (0, 255, 0),
-                            2
-                        )
+            for connection in POSE_CONNECTIONS:
+                start = landmarks[connection[0]]
+                end = landmarks[connection[1]]
+                cv2.line(frame,
+                         (int(start[0]*w), int(start[1]*h)),
+                         (int(end[0]*w), int(end[1]*h)),
+                         (0,255,0), 2)
 
-                    # Calculate right hip angle
-                    shoulder = landmarks[12]
-                    hip = landmarks[24]
-                    knee = landmarks[26]
+            shoulder = landmarks[12]
+            hip = landmarks[24]
+            knee = landmarks[26]
 
-                    angle = calculate_angle(shoulder, hip, knee)
+            angle = calculate_angle(shoulder, hip, knee)
 
-                    if angle > peak_angle:
-                        peak_angle = angle
-                        peak_frame = frame.copy()
+            if angle > peak_angle:
+                peak_angle = angle
+                peak_frame = frame.copy()
 
-                video_placeholder.image(frame, channels="BGR", use_column_width=True)
-                time.sleep(0.03 / playback_speed)
+        out.write(frame)
 
-            cap.release()
-            analysis_complete = True
+    cap.release()
+    out.release()
 
-    with col_data:
-        if analysis_complete and peak_angle > 0:
-            st.subheader("Results")
-            st.metric("Peak Hip Angle", f"{int(peak_angle)}°")
+    st.success("Analysis Complete")
 
-            low, high = EVENT_PROFILES[event_choice]["ideal"]
-            status = "OPTIMAL" if low <= peak_angle <= high else "ADJUSTMENT NEEDED"
+    st.video(output_path)
 
-            st.write(f"Status: {status}")
-            st.info(EVENT_PROFILES[event_choice]["tip"])
+    if peak_angle > 0:
+        low, high = EVENT_PROFILES[event_choice]["ideal"]
+        status = "OPTIMAL" if low <= peak_angle <= high else "ADJUSTMENT NEEDED"
 
-            if peak_frame is not None:
-                st.image(peak_frame, channels="BGR", caption="Peak Frame")
+        st.metric("Peak Hip Angle", f"{int(peak_angle)}°")
+        st.write(status)
+        st.info(EVENT_PROFILES[event_choice]["tip"])
 
-            pdf_bytes = create_pdf(
-                event_choice,
-                peak_angle,
-                status,
-                EVENT_PROFILES[event_choice]["tip"]
-            )
+        pdf_bytes = create_pdf(
+            event_choice,
+            peak_angle,
+            status,
+            EVENT_PROFILES[event_choice]["tip"]
+        )
 
-            st.download_button(
-                "Download Performance Report",
-                pdf_bytes,
-                file_name="highland_report.pdf",
-                mime="application/pdf"
-            )
+        st.download_button(
+            "Download Performance Report",
+            pdf_bytes,
+            file_name="highland_report.pdf",
+            mime="application/pdf"
+        )
