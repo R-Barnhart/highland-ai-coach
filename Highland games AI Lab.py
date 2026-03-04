@@ -5,22 +5,26 @@ import tempfile
 import time
 from fpdf import FPDF
 from datetime import datetime
+
+# --- Mediapipe Tasks API ---
 from mediapipe.tasks.python import vision
 from mediapipe.tasks.python.vision import PoseLandmarker, PoseLandmarkerOptions
+from mediapipe.tasks.python.vision import Image
 from mediapipe.tasks.python.core.base_options import BaseOptions
 
 # --- 1. FRONTEND CONFIGURATION ---
 st.set_page_config(page_title="Highland Games AI Lab", layout="wide", page_icon="🛡️")
-st.markdown("""
-<style>
-.main { background-color: #0E1117; color: #FFFFFF; }
-[data-testid="stMetricValue"] { color: #00FFCC !important; font-size: 42px; font-weight: bold; }
-.stButton>button { width: 100%; background-color: #FF4B4B; color: white; font-weight: bold; border: none; }
-.report-box { padding: 20px; border: 1px solid #333; border-radius: 10px; background-color: #1A1C24; }
-</style>
-""", unsafe_allow_html=True)
 
-# --- 2. EVENT CONFIG ---
+st.markdown("""
+    <style>
+    .main { background-color: #0E1117; color: #FFFFFF; }
+    [data-testid="stMetricValue"] { color: #00FFCC !important; font-size: 42px; font-weight: bold; }
+    .stButton>button { width: 100%; background-color: #FF4B4B; color: white; font-weight: bold; border: none; }
+    .report-box { padding: 20px; border: 1px solid #333; border-radius: 10px; background-color: #1A1C24; }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- 2. EVENTS & ANGLE CALCULATION ---
 EVENT_PROFILES = {
     "Hammer (Light/Heavy)": {"ideal": (38, 44), "tip": "Maximize orbit! Keep arms fully extended during the winds."},
     "WOB (Weight for Height)": {"ideal": (75, 88), "tip": "Vertical drive! Don't let the weight pull your chest down."},
@@ -65,73 +69,81 @@ with st.sidebar:
     play_speed = st.slider("Playback Speed", 0.1, 1.0, 1.0)
     st.divider()
 
+# --- 5. VIDEO UPLOAD ---
 st.title("Highland Games AI Performance Lab")
 u_user = st.file_uploader("Upload Your Throw", type=["mp4", "mov"])
 
-# --- 5. INIT MEDIAPIPE POSE LANDMARKER ---
-MODEL_PATH = "pose_landmarker_lite.task"  # Make sure this model exists in project
+# --- 6. INIT POSELANDMARKER ---
+MODEL_PATH = "pose_landmarker_lite.task"  # Make sure this file is in your repo
 base_options = BaseOptions(model_asset_path=MODEL_PATH)
-pose_options = PoseLandmarkerOptions(base_options=base_options, running_mode=vision.RunningMode.VIDEO)
-pose_landmarker = PoseLandmarker.create_from_options(pose_options)
+pose_options = PoseLandmarkerOptions(
+    base_options=base_options,
+    running_mode=vision.RunningMode.VIDEO
+)
+pose_landmarker = PoseLandmarker.create(pose_options)
 
-# --- 6. PROCESS VIDEO ---
+# --- 7. PROCESS VIDEO ---
 if u_user:
     t_u = tempfile.NamedTemporaryFile(delete=False)
     t_u.write(u_user.read())
 
-    col_vid, col_data = st.columns([2, 1])
-
+    col_vid, col_data = st.columns([2,1])
+    
     with col_vid:
         if st.button("🚀 Analyze Form"):
             cap = cv2.VideoCapture(t_u.name)
             st_vid = st.empty()
             peak_angle, peak_frame = 0, None
-            fps = cap.get(cv2.CAP_PROP_FPS) or 30
-
+            
             while cap.isOpened():
                 ret, frame = cap.read()
                 if not ret: break
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-                # --- PoseLandmarker detection ---
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                mp_image = Image(image_format=Image.ImageFormat.SRGB, data=frame_rgb)
+
                 result = pose_landmarker.detect_for_video(
-                    rgb,
+                    mp_image,
                     timestamp_ms=int(cap.get(cv2.CAP_PROP_POS_MSEC))
                 )
 
-                # --- Draw landmarks manually ---
                 if result.pose_landmarks:
-                    landmarks = result.pose_landmarks
-                    # Example: draw circles for hips and knees
-                    for lm in landmarks:
-                        x, y = int(lm.x * frame.shape[1]), int(lm.y * frame.shape[0])
-                        cv2.circle(frame, (x, y), 5, (0, 255, 0), -1)
-                    # Calculate angle for right hip-knee-ankle
-                    s = [landmarks[12].x * frame.shape[1], landmarks[12].y * frame.shape[0]]  # hip
-                    h = [landmarks[24].x * frame.shape[1], landmarks[24].y * frame.shape[0]]  # knee
-                    k = [landmarks[26].x * frame.shape[1], landmarks[26].y * frame.shape[0]]  # ankle
-                    ang = calculate_angle(s, h, k)
+                    landmarks = [(lm.x, lm.y) for lm in result.pose_landmarks.landmark]
+                    # draw connections manually
+                    for connection in PoseLandmarker.POSE_CONNECTIONS:
+                        start = landmarks[connection[0]]
+                        end = landmarks[connection[1]]
+                        h, w, _ = frame.shape
+                        cv2.line(frame,
+                                 (int(start[0]*w), int(start[1]*h)),
+                                 (int(end[0]*w), int(end[1]*h)),
+                                 (0,255,0), 2)
+
+                    # compute hip angle
+                    s, h_, k = landmarks[12], landmarks[24], landmarks[26]
+                    ang = calculate_angle(s, h_, k)
                     if ang > peak_angle:
                         peak_angle, peak_frame = ang, frame.copy()
 
                 st_vid.image(frame, channels="BGR", use_column_width=True)
                 time.sleep(0.03 / play_speed)
-
+            
             cap.release()
 
-            # --- DATA DASHBOARD ---
+            # --- 8. DASHBOARD ---
             with col_data:
                 st.subheader("Session Results")
                 st.metric("Peak Angle", f"{int(peak_angle)}°")
+
                 low, high = EVENT_PROFILES[event_choice]["ideal"]
                 status = "OPTIMAL" if low <= peak_angle <= high else "ADJUSTMENT NEEDED"
+
                 st.write(f"**Status:** {status}")
                 st.info(f"**Tip:** {EVENT_PROFILES[event_choice]['tip']}")
 
                 if peak_frame is not None:
                     st.image(peak_frame, channels="BGR", caption="Moment of Peak Power")
 
-                # PDF DOWNLOAD
                 pdf_bytes = create_pdf(event_choice, peak_angle, status, EVENT_PROFILES[event_choice]['tip'])
                 st.download_button(
                     label="📥 Download Performance Report",
