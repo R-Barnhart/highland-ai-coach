@@ -6,15 +6,22 @@ from fpdf import FPDF
 from datetime import datetime
 import mediapipe as mp
 
+# Mediapipe Tasks API
 from mediapipe.tasks.python import vision
 from mediapipe.tasks.python.vision import PoseLandmarker, PoseLandmarkerOptions
 from mediapipe.tasks.python.core.base_options import BaseOptions
 
 
+# ----------------------------
+# 1. PAGE SETUP
+# ----------------------------
 st.set_page_config(page_title="Highland Games AI Lab", layout="wide")
 st.title("Highland Games AI Performance Lab")
 
 
+# ----------------------------
+# 2. MANUAL POSE CONNECTIONS
+# ----------------------------
 POSE_CONNECTIONS = [
     (11,13),(13,15),(12,14),(14,16),
     (11,12),
@@ -24,6 +31,10 @@ POSE_CONNECTIONS = [
     (24,26),(26,28),(28,30),(30,32)
 ]
 
+
+# ----------------------------
+# 3. EVENT CONFIG
+# ----------------------------
 EVENT_PROFILES = {
     "Hammer": {"ideal": (38, 44), "tip": "Keep arms long and maximize orbit."},
     "WFD": {"ideal": (35, 42), "tip": "Drive through the trig with chest high."},
@@ -53,40 +64,65 @@ def create_pdf(event, angle, status, tip):
     return pdf.output(dest="S").encode("latin-1")
 
 
+# ----------------------------
+# 4. SIDEBAR
+# ----------------------------
 with st.sidebar:
     event_choice = st.selectbox("Select Event", list(EVENT_PROFILES.keys()))
 
 
+# ----------------------------
+# 5. INIT MEDIAPIPE
+# ----------------------------
 MODEL_PATH = "pose_landmarker_lite.task"
+
 base_options = BaseOptions(model_asset_path=MODEL_PATH)
 pose_options = PoseLandmarkerOptions(
     base_options=base_options,
     running_mode=vision.RunningMode.VIDEO
 )
+
 pose_landmarker = PoseLandmarker.create_from_options(pose_options)
 
 
+# ----------------------------
+# 6. VIDEO UPLOAD
+# ----------------------------
 uploaded_file = st.file_uploader("Upload Throw Video", type=["mp4", "mov"])
 
 if uploaded_file and st.button("Analyze Throw"):
 
-    input_temp = tempfile.NamedTemporaryFile(delete=False)
+    # Save uploaded file
+    input_temp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
     input_temp.write(uploaded_file.read())
+    input_temp.flush()
 
     cap = cv2.VideoCapture(input_temp.name)
+
+    if not cap.isOpened():
+        st.error("Could not open uploaded video.")
+        st.stop()
 
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS)
 
-    output_path = "processed_output.mp4"
+    if fps == 0:
+        fps = 30  # fallback FPS
+
+    # Output temp file
+    output_temp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    output_path = output_temp.name
+
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
     peak_angle = 0
-    peak_frame = None
 
-    while cap.isOpened():
+    # ----------------------------
+    # 7. PROCESS VIDEO
+    # ----------------------------
+    while True:
         ret, frame = cap.read()
         if not ret:
             break
@@ -107,6 +143,7 @@ if uploaded_file and st.button("Analyze Throw"):
             landmarks = [(lm.x, lm.y) for lm in result.pose_landmarks[0]]
             h, w, _ = frame.shape
 
+            # Draw skeleton
             for connection in POSE_CONNECTIONS:
                 start = landmarks[connection[0]]
                 end = landmarks[connection[1]]
@@ -115,6 +152,7 @@ if uploaded_file and st.button("Analyze Throw"):
                          (int(end[0]*w), int(end[1]*h)),
                          (0,255,0), 2)
 
+            # Calculate hip angle
             shoulder = landmarks[12]
             hip = landmarks[24]
             knee = landmarks[26]
@@ -123,7 +161,15 @@ if uploaded_file and st.button("Analyze Throw"):
 
             if angle > peak_angle:
                 peak_angle = angle
-                peak_frame = frame.copy()
+
+            # Overlay angle text
+            cv2.putText(frame,
+                        f"Hip Angle: {int(angle)}",
+                        (40, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1.2,
+                        (0, 255, 255),
+                        3)
 
         out.write(frame)
 
@@ -132,8 +178,15 @@ if uploaded_file and st.button("Analyze Throw"):
 
     st.success("Analysis Complete")
 
-    st.video(output_path)
+    # ✅ Serve video as bytes (fixes Streamlit media crash)
+    with open(output_path, "rb") as f:
+        video_bytes = f.read()
 
+    st.video(video_bytes)
+
+    # ----------------------------
+    # 8. RESULTS
+    # ----------------------------
     if peak_angle > 0:
         low, high = EVENT_PROFILES[event_choice]["ideal"]
         status = "OPTIMAL" if low <= peak_angle <= high else "ADJUSTMENT NEEDED"
