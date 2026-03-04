@@ -129,3 +129,4 @@ if u_user:
                     file_name=f"Highland_Report_{event_choice.replace(' ', '_')}.pdf",
                     mime="application/pdf"
                 )
+
