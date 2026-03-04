@@ -1,16 +1,18 @@
 import streamlit as st
 import cv2
-import mediapipe as mp
 import numpy as np
 import tempfile
 import time
 from fpdf import FPDF
 from datetime import datetime
-import os
+
+# --- MediaPipe Tasks API imports ---
+from mediapipe.tasks.python import vision
+from mediapipe.tasks.python.vision import PoseLandmarker, PoseLandmarkerOptions
+from mediapipe.tasks.python.core.base_options import BaseOptions
 
 # --- 1. FRONTEND CONFIGURATION ---
 st.set_page_config(page_title="Highland Games AI Lab", layout="wide", page_icon="🛡️")
-
 st.markdown("""
     <style>
     .main { background-color: #0E1117; color: #FFFFFF; }
@@ -20,11 +22,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. AI & PHYSICS SETUP ---
-from mediapipe.tasks.python import vision
-from mediapipe.tasks.python.vision import PoseLandmarker, PoseLandmarkerOptions
-from mediapipe.tasks.python.core.base_options import BaseOptions
-
+# --- 2. EVENT PROFILES & ANGLE CALCULATION ---
 EVENT_PROFILES = {
     "Hammer (Light/Heavy)": {"ideal": (38, 44), "tip": "Maximize orbit! Keep arms fully extended during the winds."},
     "WOB (Weight for Height)": {"ideal": (75, 88), "tip": "Vertical drive! Don't let the weight pull your chest down."},
@@ -62,78 +60,87 @@ def create_pdf(event, angle, status, tip):
     pdf.multi_cell(0, 10, txt=f"Coach's Feedback: {tip}")
     return pdf.output(dest='S').encode('latin-1')
 
-# --- 4. SIDEBAR UI ---
+# --- 4. SIDEBAR ---
 with st.sidebar:
     st.title("🛡️ Coach's Panel")
     event_choice = st.selectbox("Select Event", list(EVENT_PROFILES.keys()))
     play_speed = st.slider("Playback Speed", 0.1, 1.0, 1.0)
     st.divider()
 
+# --- 5. LOAD POSE LANDMARKER MODEL ---
+MODEL_PATH = "pose_landmarker_lite.task"  # must exist in project folder
+base_options = BaseOptions(model_asset_path=MODEL_PATH)
+pose_options = PoseLandmarkerOptions(
+    base_options=base_options,
+    running_mode=vision.RunningMode.VIDEO
+)
+pose_landmarker = PoseLandmarker(pose_options)
+
+# --- 6. VIDEO UPLOAD & PROCESSING ---
 st.title("Highland Games AI Performance Lab")
 u_user = st.file_uploader("Upload Your Throw", type=["mp4", "mov"])
 
-# --- 5. LOAD POSE LANDMARKER MODEL ---
-MODEL_PATH = "pose_landmarker_lite.task"  # Must exist in project folder
-base_options = BaseOptions(model_asset_path=MODEL_PATH)
-pose_options = PoseLandmarkerOptions(base_options=base_options, running_mode=vision.RunningMode.VIDEO)
-pose_landmarker = PoseLandmarker.create(pose_options)
-
-# --- 6. PROCESS VIDEO ---
 if u_user:
     t_u = tempfile.NamedTemporaryFile(delete=False)
     t_u.write(u_user.read())
-    t_u.flush()
 
     col_vid, col_data = st.columns([2, 1])
 
     with col_vid:
         if st.button("🚀 Analyze Form"):
             cap = cv2.VideoCapture(t_u.name)
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-            # Production-safe video writer
-            temp_output_path = "processed_output.mp4"
-            fourcc = cv2.VideoWriter_fourcc(*"avc1")  # cross-platform safe
-            out = cv2.VideoWriter(temp_output_path, fourcc, fps, (width, height))
-
             st_vid = st.empty()
             peak_angle, peak_frame = 0, None
+
+            fps = cap.get(cv2.CAP_PROP_FPS)
             timestamp_ms = 0
+
+            # Define skeleton connections (example: upper body)
+            CONNECTIONS = [
+                (11, 13), (13, 15),  # left arm
+                (12, 14), (14, 16),  # right arm
+                (11, 23), (12, 24),  # shoulders to hips
+                (23, 24), (23, 25), (24, 26),  # legs
+            ]
 
             while cap.isOpened():
                 ret, frame = cap.read()
-                if not ret: 
+                if not ret:
                     break
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                result = pose_landmarker.detect_for_video(rgb, timestamp_ms)
-                timestamp_ms += int(1000 / fps)
 
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                vision_image = vision.Image(image_format=vision.ImageFormat.SRGB, data=rgb)
+                result = pose_landmarker.detect_for_video(vision_image, int(timestamp_ms))
+                timestamp_ms += 1000 / fps
+
+                # --- Draw skeleton overlay ---
                 if result.pose_landmarks:
-                    landmarks = result.pose_landmarks
+                    landmarks = result.pose_landmarks[0]  # PoseLandmarker returns a list
+                    h, w, _ = frame.shape
                     # Draw connections
-                    for connection in mp.solutions.pose.POSE_CONNECTIONS:
+                    for connection in CONNECTIONS:
                         start = landmarks[connection[0]]
                         end = landmarks[connection[1]]
-                        cv2.line(frame,
-                                 (int(start.x * width), int(start.y * height)),
-                                 (int(end.x * width), int(end.y * height)),
-                                 (0, 255, 0), 2)
-                    # Calculate hip-knee-shoulder angle
+                        x1, y1 = int(start.x * w), int(start.y * h)
+                        x2, y2 = int(end.x * w), int(end.y * h)
+                        cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    # Draw landmarks
+                    for lm in landmarks:
+                        x, y = int(lm.x * w), int(lm.y * h)
+                        cv2.circle(frame, (x, y), 4, (0, 0, 255), -1)
+
+                    # --- Calculate angles (shoulder-hip-knee) ---
                     s = [landmarks[12].x, landmarks[12].y]
-                    h = [landmarks[24].x, landmarks[24].y]
+                    h_ = [landmarks[24].x, landmarks[24].y]
                     k = [landmarks[26].x, landmarks[26].y]
-                    ang = calculate_angle(s, h, k)
+                    ang = calculate_angle(s, h_, k)
                     if ang > peak_angle:
                         peak_angle, peak_frame = ang, frame.copy()
 
-                out.write(frame)
                 st_vid.image(frame, channels="BGR", use_container_width=True)
                 time.sleep(0.03 / play_speed)
 
             cap.release()
-            out.release()
 
             # --- DATA DASHBOARD ---
             with col_data:
@@ -149,7 +156,7 @@ if u_user:
                 if peak_frame is not None:
                     st.image(peak_frame, channels="BGR", caption="Moment of Peak Power")
 
-                # PDF DOWNLOAD
+                # --- PDF DOWNLOAD ---
                 pdf_bytes = create_pdf(event_choice, peak_angle, status, EVENT_PROFILES[event_choice]['tip'])
                 st.download_button(
                     label="📥 Download Performance Report",
@@ -157,8 +164,4 @@ if u_user:
                     file_name=f"Highland_Report_{event_choice.replace(' ', '_')}.pdf",
                     mime="application/pdf"
                 )
-
-            # --- PLAY THE VIDEO ---
-            st.subheader("Processed Video with Skeleton Overlay")
-            st.video(temp_output_path)
 
