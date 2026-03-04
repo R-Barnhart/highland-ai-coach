@@ -1,11 +1,15 @@
 import streamlit as st
 import cv2
-import mediapipe as mp
 import numpy as np
 import tempfile
 import time
 from fpdf import FPDF
 from datetime import datetime
+
+# Mediapipe Tasks API
+from mediapipe.tasks.python import vision
+from mediapipe.tasks.python.vision import PoseLandmarker, PoseLandmarkerOptions
+from mediapipe.tasks.python.core.base_options import BaseOptions
 
 # --- 1. FRONTEND CONFIGURATION ---
 st.set_page_config(page_title="Highland Games AI Lab", layout="wide", page_icon="🛡️")
@@ -17,15 +21,20 @@ st.markdown("""
     .stButton>button { width: 100%; background-color: #FF4B4B; color: white; font-weight: bold; border: none; }
     .report-box { padding: 20px; border: 1px solid #333; border-radius: 10px; background-color: #1A1C24; }
     </style>
-    """, unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
 # --- 2. AI & PHYSICS SETUP ---
-mp_pose = mp.solutions.pose
-mp_drawing = mp.solutions.drawing_utils
-pose = mp_pose.Pose(static_image_mode=False,
-                    min_detection_confidence=0.7,
-                    min_tracking_confidence=0.7)
+MODEL_PATH = "pose_landmarker_lite.task"  # download this model and add to your repo
 
+base_options = BaseOptions(model_asset_path=MODEL_PATH)
+pose_options = PoseLandmarkerOptions(
+    base_options=base_options,
+    output_pose_landmarks=True,
+    running_mode=vision.RunningMode.VIDEO
+)
+pose_landmarker = PoseLandmarker.create(pose_options)
+
+# --- 3. EVENT PROFILES ---
 EVENT_PROFILES = {
     "Hammer (Light/Heavy)": {"ideal": (38, 44), "tip": "Maximize orbit! Keep arms fully extended during the winds."},
     "WOB (Weight for Height)": {"ideal": (75, 88), "tip": "Vertical drive! Don't let the weight pull your chest down."},
@@ -36,13 +45,14 @@ EVENT_PROFILES = {
     "Braemar Stone": {"ideal": (39, 45), "tip": "Leg drive! Keep the stone tucked until the final extension."}
 }
 
+# --- 4. ANGLE CALCULATION ---
 def calculate_angle(a, b, c):
     a, b, c = np.array(a), np.array(b), np.array(c)
     rad = np.arctan2(c[1]-b[1], c[0]-b[0]) - np.arctan2(a[1]-b[1], a[0]-b[0])
     angle = np.abs(rad*180.0/np.pi)
     return 360 - angle if angle > 180 else angle
 
-# --- 3. PDF GENERATOR ---
+# --- 5. PDF GENERATOR ---
 def create_pdf(event, angle, status, tip):
     pdf = FPDF()
     pdf.add_page()
@@ -63,7 +73,7 @@ def create_pdf(event, angle, status, tip):
     pdf.multi_cell(0, 10, txt=f"Coach's Feedback: {tip}")
     return pdf.output(dest='S').encode('latin-1')
 
-# --- 4. MAIN APP INTERFACE ---
+# --- 6. MAIN APP INTERFACE ---
 with st.sidebar:
     st.title("🛡️ Coach's Panel")
     event_choice = st.selectbox("Select Event", list(EVENT_PROFILES.keys()))
@@ -73,45 +83,67 @@ with st.sidebar:
 st.title("Highland Games AI Performance Lab")
 u_user = st.file_uploader("Upload Your Throw", type=["mp4", "mov"])
 
+# --- 7. PROCESS VIDEO ---
 if u_user:
     t_u = tempfile.NamedTemporaryFile(delete=False)
     t_u.write(u_user.read())
-   
+
     col_vid, col_data = st.columns([2, 1])
-   
+
     with col_vid:
         if st.button("🚀 Analyze Form"):
             cap = cv2.VideoCapture(t_u.name)
             st_vid = st.empty()
             peak_angle, peak_frame = 0, None
-           
+            timestamp_ms = 0
+
             while cap.isOpened():
                 ret, frame = cap.read()
-                if not ret: break
+                if not ret:
+                    break
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                res = pose.process(rgb)
-                if res.pose_landmarks:
-                    mp_drawing.draw_landmarks(frame, res.pose_landmarks, mp_pose.POSE_CONNECTIONS)
-                    lm = res.pose_landmarks.landmark
+
+                # --- PoseLandmarker inference ---
+                results = pose_landmarker.detect_for_video(rgb, timestamp_ms)
+                timestamp_ms += int(1000 / cap.get(cv2.CAP_PROP_FPS))
+
+                # --- DRAW SKELETON ---
+                if results.pose_landmarks:
+                    for landmark_set in results.pose_landmarks:
+                        for connection in PoseLandmarker.POSE_CONNECTIONS:
+                            start_idx, end_idx = connection
+                            start = landmark_set.landmark[start_idx]
+                            end = landmark_set.landmark[end_idx]
+                            h, w = frame.shape[:2]
+                            cv2.line(frame,
+                                     (int(start.x * w), int(start.y * h)),
+                                     (int(end.x * w), int(end.y * h)),
+                                     (0, 255, 0), 2)
+                        for lm in landmark_set.landmark:
+                            cv2.circle(frame, (int(lm.x * frame.shape[1]), int(lm.y * frame.shape[0])), 5, (0, 0, 255), -1)
+
+                    # --- CALCULATE ANGLE ---
+                    lm = results.pose_landmarks[0].landmark
                     s, h, k = [lm[12].x, lm[12].y], [lm[24].x, lm[24].y], [lm[26].x, lm[26].y]
                     ang = calculate_angle(s, h, k)
                     if ang > peak_angle:
                         peak_angle, peak_frame = ang, frame.copy()
+
                 st_vid.image(frame, channels="BGR", use_container_width=True)
                 time.sleep(0.03 / play_speed)
+
             cap.release()
 
             # --- DATA DASHBOARD ---
             with col_data:
                 st.subheader("Session Results")
                 st.metric("Peak Angle", f"{int(peak_angle)}°")
-               
                 low, high = EVENT_PROFILES[event_choice]["ideal"]
                 status = "OPTIMAL" if low <= peak_angle <= high else "ADJUSTMENT NEEDED"
-               
+
                 st.write(f"**Status:** {status}")
                 st.info(f"**Tip:** {EVENT_PROFILES[event_choice]['tip']}")
-               
+
                 if peak_frame is not None:
                     st.image(peak_frame, channels="BGR", caption="Moment of Peak Power")
 
