@@ -22,8 +22,25 @@ st.set_page_config(
     page_icon="🛡️"
 )
 
+st.title("Highland Games AI Performance Lab")
+
+
 # ----------------------------
-# 2. EVENT CONFIG
+# 2. MANUAL POSE CONNECTIONS
+# (Tasks API does NOT provide POSE_CONNECTIONS)
+# ----------------------------
+POSE_CONNECTIONS = [
+    (11,13),(13,15),(12,14),(14,16),
+    (11,12),
+    (23,24),
+    (11,23),(12,24),
+    (23,25),(25,27),(27,29),(29,31),
+    (24,26),(26,28),(28,30),(30,32)
+]
+
+
+# ----------------------------
+# 3. EVENT CONFIG
 # ----------------------------
 EVENT_PROFILES = {
     "Hammer": {"ideal": (38, 44), "tip": "Keep arms long and maximize orbit."},
@@ -55,16 +72,16 @@ def create_pdf(event, angle, status, tip):
 
 
 # ----------------------------
-# 3. SIDEBAR
+# 4. SIDEBAR
 # ----------------------------
 with st.sidebar:
-    st.title("Coach Panel")
+    st.header("My Coach Panel")
     event_choice = st.selectbox("Select Event", list(EVENT_PROFILES.keys()))
     playback_speed = st.slider("Playback Speed", 0.25, 1.5, 1.0)
 
 
 # ----------------------------
-# 4. INIT POSE LANDMARKER
+# 5. INIT POSE LANDMARKER
 # ----------------------------
 MODEL_PATH = "pose_landmarker_lite.task"
 
@@ -79,13 +96,11 @@ pose_landmarker = PoseLandmarker.create_from_options(pose_options)
 
 
 # ----------------------------
-# 5. MAIN APP
+# 6. MAIN VIDEO LOGIC
 # ----------------------------
-st.title("Highland Games AI Performance Lab")
-
 uploaded_file = st.file_uploader("Upload Throw Video", type=["mp4", "mov"])
 
-# ✅ DEFINE VARIABLES EARLY (Fixes NameError)
+# ✅ Prevent NameError
 peak_angle = 0
 peak_frame = None
 analysis_complete = False
@@ -98,6 +113,7 @@ if uploaded_file:
 
     with col_video:
         if st.button("Analyze Throw"):
+
             cap = cv2.VideoCapture(temp_file.name)
             video_placeholder = st.empty()
 
@@ -108,6 +124,7 @@ if uploaded_file:
 
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
+                # ✅ REQUIRED mp.Image wrapper
                 mp_image = mp.Image(
                     image_format=mp.ImageFormat.SRGB,
                     data=frame_rgb
@@ -122,7 +139,8 @@ if uploaded_file:
                     landmarks = [(lm.x, lm.y) for lm in result.pose_landmarks[0]]
                     h, w, _ = frame.shape
 
-                    for connection in PoseLandmarker.POSE_CONNECTIONS:
+                    # Draw skeleton manually
+                    for connection in POSE_CONNECTIONS:
                         start = landmarks[connection[0]]
                         end = landmarks[connection[1]]
 
@@ -134,6 +152,7 @@ if uploaded_file:
                             2
                         )
 
+                    # Calculate right hip angle
                     shoulder = landmarks[12]
                     hip = landmarks[24]
                     knee = landmarks[26]
