@@ -9,12 +9,10 @@ from datetime import datetime
 # --- Mediapipe Tasks API ---
 from mediapipe.tasks.python import vision
 from mediapipe.tasks.python.vision import PoseLandmarker, PoseLandmarkerOptions
-from mediapipe.tasks.python.vision import Image
 from mediapipe.tasks.python.core.base_options import BaseOptions
 
 # --- 1. FRONTEND CONFIGURATION ---
 st.set_page_config(page_title="Highland Games AI Lab", layout="wide", page_icon="🛡️")
-
 st.markdown("""
     <style>
     .main { background-color: #0E1117; color: #FFFFFF; }
@@ -22,7 +20,7 @@ st.markdown("""
     .stButton>button { width: 100%; background-color: #FF4B4B; color: white; font-weight: bold; border: none; }
     .report-box { padding: 20px; border: 1px solid #333; border-radius: 10px; background-color: #1A1C24; }
     </style>
-    """, unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
 # --- 2. EVENTS & ANGLE CALCULATION ---
 EVENT_PROFILES = {
@@ -74,7 +72,7 @@ st.title("Highland Games AI Performance Lab")
 u_user = st.file_uploader("Upload Your Throw", type=["mp4", "mov"])
 
 # --- 6. INIT POSELANDMARKER ---
-MODEL_PATH = "pose_landmarker_lite.task"  # Make sure this file is in your repo
+MODEL_PATH = "pose_landmarker_lite.task"  # Make sure the file exists
 base_options = BaseOptions(model_asset_path=MODEL_PATH)
 pose_options = PoseLandmarkerOptions(
     base_options=base_options,
@@ -100,20 +98,21 @@ if u_user:
                 if not ret: break
 
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                mp_image = Image(image_format=Image.ImageFormat.SRGB, data=frame_rgb)
 
+                # --- PoseLandmarker detection (numpy array is fine!) ---
                 result = pose_landmarker.detect_for_video(
-                    mp_image,
+                    frame_rgb,
                     timestamp_ms=int(cap.get(cv2.CAP_PROP_POS_MSEC))
                 )
 
                 if result.pose_landmarks:
                     landmarks = [(lm.x, lm.y) for lm in result.pose_landmarks.landmark]
-                    # draw connections manually
+                    h, w, _ = frame.shape
+
+                    # draw connections
                     for connection in PoseLandmarker.POSE_CONNECTIONS:
                         start = landmarks[connection[0]]
                         end = landmarks[connection[1]]
-                        h, w, _ = frame.shape
                         cv2.line(frame,
                                  (int(start[0]*w), int(start[1]*h)),
                                  (int(end[0]*w), int(end[1]*h)),
