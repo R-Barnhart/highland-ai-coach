@@ -30,6 +30,26 @@ pose_options = PoseLandmarkerOptions(
 pose_landmarker = PoseLandmarker.create_from_options(pose_options)
 
 # ---------------------------------
+# MANUAL POSE CONNECTIONS (Tasks API compatible)
+# ---------------------------------
+POSE_CONNECTIONS = [
+    # Arms
+    (11,13),(13,15),
+    (12,14),(14,16),
+
+    # Shoulders
+    (11,12),
+
+    # Torso
+    (11,23),(12,24),
+    (23,24),
+
+    # Legs
+    (23,25),(25,27),
+    (24,26),(26,28)
+]
+
+# ---------------------------------
 # EVENT PROFILES
 # ---------------------------------
 EVENT_PROFILES = {
@@ -113,7 +133,7 @@ if uploaded_file:
 
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-                # --- FIXED IMAGE WRAPPER ---
+                # ---- Correct MediaPipe Image wrapper ----
                 mp_image = mp.Image(
                     image_format=mp.ImageFormat.SRGB,
                     data=rgb
@@ -131,13 +151,14 @@ if uploaded_file:
                     landmarks = result.pose_landmarks[0]
                     h, w, _ = frame.shape
 
-                    # Draw skeleton connections
-                    connections = mp.solutions.pose.POSE_CONNECTIONS
-                    for connection in connections:
+                    # Draw skeleton
+                    for connection in POSE_CONNECTIONS:
                         start = landmarks[connection[0]]
                         end = landmarks[connection[1]]
+
                         x1, y1 = int(start.x * w), int(start.y * h)
                         x2, y2 = int(end.x * w), int(end.y * h)
+
                         cv2.line(frame, (x1, y1), (x2, y2), (0,255,0), 2)
 
                     # Calculate hip angle
@@ -147,11 +168,10 @@ if uploaded_file:
 
                     angle = calculate_angle(shoulder, hip, knee)
 
-                    # Smooth small fluctuations
+                    # Smooth last 5 frames
+                    angle_history.append(angle)
                     if len(angle_history) > 5:
                         angle = np.mean(angle_history[-5:])
-
-                    angle_history.append(angle)
 
                     cv2.putText(frame, f"Hip Angle: {int(angle)}°",
                                 (40, 50),
@@ -182,7 +202,6 @@ if uploaded_file:
                 st.write(f"**Status:** {status}")
                 st.info(EVENT_PROFILES[event_choice]["tip"])
 
-                # Angle chart
                 st.line_chart(angle_history)
 
                 if peak_frame is not None:
@@ -201,4 +220,3 @@ if uploaded_file:
                     file_name="Highland_Report.pdf",
                     mime="application/pdf"
                 )
-
