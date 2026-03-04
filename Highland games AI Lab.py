@@ -1,217 +1,164 @@
 import streamlit as st
 import cv2
+import mediapipe as mp
 import numpy as np
 import tempfile
-import os
+import time
 from fpdf import FPDF
 from datetime import datetime
-import mediapipe as mp
+import os
+
+# --- 1. FRONTEND CONFIGURATION ---
+st.set_page_config(page_title="Highland Games AI Lab", layout="wide", page_icon="🛡️")
+
+st.markdown("""
+    <style>
+    .main { background-color: #0E1117; color: #FFFFFF; }
+    [data-testid="stMetricValue"] { color: #00FFCC !important; font-size: 42px; font-weight: bold; }
+    .stButton>button { width: 100%; background-color: #FF4B4B; color: white; font-weight: bold; border: none; }
+    .report-box { padding: 20px; border: 1px solid #333; border-radius: 10px; background-color: #1A1C24; }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- 2. AI & PHYSICS SETUP ---
 from mediapipe.tasks.python import vision
 from mediapipe.tasks.python.vision import PoseLandmarker, PoseLandmarkerOptions
 from mediapipe.tasks.python.core.base_options import BaseOptions
 
-# ---------------------------------
-# PAGE CONFIG
-# ---------------------------------
-st.set_page_config(page_title="Highland Games AI Lab", layout="wide", page_icon="🛡️")
-
-# ---------------------------------
-# LOAD MODEL
-# ---------------------------------
-MODEL_PATH = "pose_landmarker_lite.task"
-
-base_options = BaseOptions(model_asset_path=MODEL_PATH)
-pose_options = PoseLandmarkerOptions(
-    base_options=base_options,
-    running_mode=vision.RunningMode.VIDEO
-)
-
-pose_landmarker = PoseLandmarker.create_from_options(pose_options)
-
-# ---------------------------------
-# MANUAL POSE CONNECTIONS
-# ---------------------------------
-POSE_CONNECTIONS = [
-    (11,13),(13,15),
-    (12,14),(14,16),
-    (11,12),
-    (11,23),(12,24),
-    (23,24),
-    (23,25),(25,27),
-    (24,26),(26,28)
-]
-
-# ---------------------------------
-# EVENTS
-# ---------------------------------
 EVENT_PROFILES = {
-    "Hammer": {"ideal": (38, 44), "tip": "Keep arms long and maximize orbit."},
-    "WOB": {"ideal": (75, 88), "tip": "Drive vertically. Chest tall."},
-    "WFD": {"ideal": (35, 42), "tip": "Drive through the trig."},
-    "Sheaf": {"ideal": (65, 82), "tip": "Hinge and snap hips."},
-    "Caber": {"ideal": (80, 95), "tip": "Stay tall through transition."},
-    "Open Stone": {"ideal": (37, 43), "tip": "Explosive weight transfer."},
-    "Braemar": {"ideal": (39, 45), "tip": "Strong leg drive."}
+    "Hammer (Light/Heavy)": {"ideal": (38, 44), "tip": "Maximize orbit! Keep arms fully extended during the winds."},
+    "WOB (Weight for Height)": {"ideal": (75, 88), "tip": "Vertical drive! Don't let the weight pull your chest down."},
+    "WFD (Weight for Distance)": {"ideal": (35, 42), "tip": "Drive through the trig! Keep the chest high at release."},
+    "Sheaf Toss": {"ideal": (65, 82), "tip": "Hinge and snap! Use your hips to flick the fork upward."},
+    "Caber Toss": {"ideal": (80, 95), "tip": "Tall posture! Look at the horizon during the run and transition."},
+    "Open Stone": {"ideal": (37, 43), "tip": "Explosive glide! Transfer weight from back to front quickly."},
+    "Braemar Stone": {"ideal": (39, 45), "tip": "Leg drive! Keep the stone tucked until the final extension."}
 }
 
-# ---------------------------------
-# ANGLE FUNCTION
-# ---------------------------------
 def calculate_angle(a, b, c):
     a, b, c = np.array(a), np.array(b), np.array(c)
     rad = np.arctan2(c[1]-b[1], c[0]-b[0]) - np.arctan2(a[1]-b[1], a[0]-b[0])
-    angle = np.abs(rad * 180.0 / np.pi)
+    angle = np.abs(rad*180.0/np.pi)
     return 360 - angle if angle > 180 else angle
 
-# ---------------------------------
-# PDF
-# ---------------------------------
+# --- 3. PDF GENERATOR ---
 def create_pdf(event, angle, status, tip):
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_font("Arial", 'B', 18)
-    pdf.cell(200, 10, "Highland Games Performance Report", ln=True, align="C")
+    pdf.set_font("Arial", 'B', 20)
+    pdf.cell(200, 10, txt="Highland Games Performance Report", ln=True, align='C')
     pdf.set_font("Arial", size=12)
     pdf.ln(10)
-    pdf.cell(200, 10, f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=True)
-    pdf.cell(200, 10, f"Event: {event}", ln=True)
-    pdf.cell(200, 10, f"Peak Hip Angle: {int(angle)}°", ln=True)
-    pdf.cell(200, 10, f"Status: {status}", ln=True)
+    pdf.cell(200, 10, txt=f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}", ln=True)
+    pdf.cell(200, 10, txt=f"Event: {event}", ln=True)
     pdf.ln(5)
-    pdf.multi_cell(0, 10, f"Coach Feedback: {tip}")
+    pdf.set_font("Arial", 'B', 14)
+    pdf.cell(200, 10, txt=f"Peak Hip Extension: {int(angle)} degrees", ln=True)
+    pdf.set_text_color(0, 128, 0) if status == "OPTIMAL" else pdf.set_text_color(255, 0, 0)
+    pdf.cell(200, 10, txt=f"Status: {status}", ln=True)
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(5)
+    pdf.set_font("Arial", 'I', 12)
+    pdf.multi_cell(0, 10, txt=f"Coach's Feedback: {tip}")
     return pdf.output(dest='S').encode('latin-1')
 
-# ---------------------------------
-# UI
-# ---------------------------------
+# --- 4. SIDEBAR UI ---
 with st.sidebar:
-    st.title("🛡️ Coach Panel")
+    st.title("🛡️ Coach's Panel")
     event_choice = st.selectbox("Select Event", list(EVENT_PROFILES.keys()))
+    play_speed = st.slider("Playback Speed", 0.1, 1.0, 1.0)
+    st.divider()
 
 st.title("Highland Games AI Performance Lab")
-uploaded_file = st.file_uploader("Upload Throw Video", type=["mp4", "mov"])
+u_user = st.file_uploader("Upload Your Throw", type=["mp4", "mov"])
 
-# ---------------------------------
-# PROCESS VIDEO SAFELY
-# ---------------------------------
-if uploaded_file:
+# --- 5. LOAD POSE LANDMARKER MODEL ---
+MODEL_PATH = "pose_landmarker_lite.task"  # Must exist in project folder
+base_options = BaseOptions(model_asset_path=MODEL_PATH)
+pose_options = PoseLandmarkerOptions(base_options=base_options, running_mode=vision.RunningMode.VIDEO)
+pose_landmarker = PoseLandmarker.create(pose_options)
 
-    temp_input = tempfile.NamedTemporaryFile(delete=False)
-    temp_input.write(uploaded_file.read())
-    temp_input.close()
+# --- 6. PROCESS VIDEO ---
+if u_user:
+    t_u = tempfile.NamedTemporaryFile(delete=False)
+    t_u.write(u_user.read())
+    t_u.flush()
 
-    if st.button("🚀 Analyze Form"):
+    col_vid, col_data = st.columns([2, 1])
 
-        cap = cv2.VideoCapture(temp_input.name)
+    with col_vid:
+        if st.button("🚀 Analyze Form"):
+            cap = cv2.VideoCapture(t_u.name)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        if fps == 0:
-            fps = 30
+            # Production-safe video writer
+            temp_output_path = "processed_output.mp4"
+            fourcc = cv2.VideoWriter_fourcc(*"avc1")  # cross-platform safe
+            out = cv2.VideoWriter(temp_output_path, fourcc, fps, (width, height))
 
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            st_vid = st.empty()
+            peak_angle, peak_frame = 0, None
+            timestamp_ms = 0
 
-        temp_output_path = "processed_output.mp4"
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret: 
+                    break
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                result = pose_landmarker.detect_for_video(rgb, timestamp_ms)
+                timestamp_ms += int(1000 / fps)
 
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        out = cv2.VideoWriter(temp_output_path, fourcc, fps, (width, height))
+                if result.pose_landmarks:
+                    landmarks = result.pose_landmarks
+                    # Draw connections
+                    for connection in mp.solutions.pose.POSE_CONNECTIONS:
+                        start = landmarks[connection[0]]
+                        end = landmarks[connection[1]]
+                        cv2.line(frame,
+                                 (int(start.x * width), int(start.y * height)),
+                                 (int(end.x * width), int(end.y * height)),
+                                 (0, 255, 0), 2)
+                    # Calculate hip-knee-shoulder angle
+                    s = [landmarks[12].x, landmarks[12].y]
+                    h = [landmarks[24].x, landmarks[24].y]
+                    k = [landmarks[26].x, landmarks[26].y]
+                    ang = calculate_angle(s, h, k)
+                    if ang > peak_angle:
+                        peak_angle, peak_frame = ang, frame.copy()
 
-        peak_angle = 0
-        angle_history = []
-        timestamp_ms = 0
+                out.write(frame)
+                st_vid.image(frame, channels="BGR", use_container_width=True)
+                time.sleep(0.03 / play_speed)
 
-        progress = st.progress(0)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        frame_count = 0
+            cap.release()
+            out.release()
 
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
+            # --- DATA DASHBOARD ---
+            with col_data:
+                st.subheader("Session Results")
+                st.metric("Peak Angle", f"{int(peak_angle)}°")
 
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                low, high = EVENT_PROFILES[event_choice]["ideal"]
+                status = "OPTIMAL" if low <= peak_angle <= high else "ADJUSTMENT NEEDED"
 
-            mp_image = mp.Image(
-                image_format=mp.ImageFormat.SRGB,
-                data=rgb
-            )
+                st.write(f"**Status:** {status}")
+                st.info(f"**Tip:** {EVENT_PROFILES[event_choice]['tip']}")
 
-            result = pose_landmarker.detect_for_video(
-                mp_image,
-                int(timestamp_ms)
-            )
+                if peak_frame is not None:
+                    st.image(peak_frame, channels="BGR", caption="Moment of Peak Power")
 
-            timestamp_ms += 1000 / fps
+                # PDF DOWNLOAD
+                pdf_bytes = create_pdf(event_choice, peak_angle, status, EVENT_PROFILES[event_choice]['tip'])
+                st.download_button(
+                    label="📥 Download Performance Report",
+                    data=pdf_bytes,
+                    file_name=f"Highland_Report_{event_choice.replace(' ', '_')}.pdf",
+                    mime="application/pdf"
+                )
 
-            if result.pose_landmarks:
-                landmarks = result.pose_landmarks[0]
+            # --- PLAY THE VIDEO ---
+            st.subheader("Processed Video with Skeleton Overlay")
+            st.video(temp_output_path)
 
-                # Draw skeleton
-                for connection in POSE_CONNECTIONS:
-                    start = landmarks[connection[0]]
-                    end = landmarks[connection[1]]
-
-                    x1, y1 = int(start.x * width), int(start.y * height)
-                    x2, y2 = int(end.x * width), int(end.y * height)
-
-                    cv2.line(frame, (x1, y1), (x2, y2), (0,255,0), 2)
-
-                shoulder = (landmarks[12].x, landmarks[12].y)
-                hip = (landmarks[24].x, landmarks[24].y)
-                knee = (landmarks[26].x, landmarks[26].y)
-
-                angle = calculate_angle(shoulder, hip, knee)
-                angle_history.append(angle)
-
-                if angle > peak_angle:
-                    peak_angle = angle
-
-                cv2.putText(frame, f"Hip Angle: {int(angle)}°",
-                            (40, 50),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            1,
-                            (0, 255, 0),
-                            2)
-
-            out.write(frame)
-
-            frame_count += 1
-            progress.progress(min(frame_count / total_frames, 1.0))
-
-        cap.release()
-        out.release()
-
-        progress.empty()
-
-        # ---------------------------------
-        # DISPLAY RESULTS
-        # ---------------------------------
-        st.subheader("Processed Video")
-        st.video(temp_output_path)
-
-        st.subheader("Session Results")
-        st.metric("Peak Hip Angle", f"{int(peak_angle)}°")
-
-        low, high = EVENT_PROFILES[event_choice]["ideal"]
-        status = "OPTIMAL" if low <= peak_angle <= high else "ADJUSTMENT NEEDED"
-
-        st.write(f"**Status:** {status}")
-        st.info(EVENT_PROFILES[event_choice]["tip"])
-
-        st.line_chart(angle_history)
-
-        pdf_bytes = create_pdf(
-            event_choice,
-            peak_angle,
-            status,
-            EVENT_PROFILES[event_choice]["tip"]
-        )
-
-        st.download_button(
-            "📥 Download Performance Report",
-            data=pdf_bytes,
-            file_name="Highland_Report.pdf",
-            mime="application/pdf"
-        )
-
-        os.remove(temp_input.name)
