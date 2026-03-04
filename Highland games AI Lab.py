@@ -21,10 +21,10 @@ st.markdown("""
 
 # --- 2. AI & PHYSICS SETUP ---
 mp_pose = mp.solutions.pose
+mp_drawing = mp.solutions.drawing_utils
 pose = mp_pose.Pose(static_image_mode=False,
                     min_detection_confidence=0.7,
                     min_tracking_confidence=0.7)
-mp_drawing = mp.solutions.drawing_utils
 
 EVENT_PROFILES = {
     "Hammer (Light/Heavy)": {"ideal": (38, 44), "tip": "Maximize orbit! Keep arms fully extended during the winds."},
@@ -90,7 +90,6 @@ if u_user:
                 if not ret: break
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 res = pose.process(rgb)
-               
                 if res.pose_landmarks:
                     mp_drawing.draw_landmarks(frame, res.pose_landmarks, mp_pose.POSE_CONNECTIONS)
                     lm = res.pose_landmarks.landmark
@@ -98,10 +97,8 @@ if u_user:
                     ang = calculate_angle(s, h, k)
                     if ang > peak_angle:
                         peak_angle, peak_frame = ang, frame.copy()
-               
                 st_vid.image(frame, channels="BGR", use_container_width=True)
                 time.sleep(0.03 / play_speed)
-           
             cap.release()
 
             # --- DATA DASHBOARD ---
