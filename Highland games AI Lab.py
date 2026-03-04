@@ -1,25 +1,26 @@
 import streamlit as st
 import cv2
-import mediapipe as mp
 import numpy as np
 import tempfile
 import time
 from fpdf import FPDF
 from datetime import datetime
+from mediapipe.tasks.python import vision
+from mediapipe.tasks.python.vision import PoseLandmarker, PoseLandmarkerOptions
+from mediapipe.tasks.python.core.base_options import BaseOptions
 
 # --- 1. FRONTEND CONFIGURATION ---
 st.set_page_config(page_title="Highland Games AI Lab", layout="wide", page_icon="🛡️")
-
 st.markdown("""
-    <style>
-    .main { background-color: #0E1117; color: #FFFFFF; }
-    [data-testid="stMetricValue"] { color: #00FFCC !important; font-size: 42px; font-weight: bold; }
-    .stButton>button { width: 100%; background-color: #FF4B4B; color: white; font-weight: bold; border: none; }
-    .report-box { padding: 20px; border: 1px solid #333; border-radius: 10px; background-color: #1A1C24; }
-    </style>
+<style>
+.main { background-color: #0E1117; color: #FFFFFF; }
+[data-testid="stMetricValue"] { color: #00FFCC !important; font-size: 42px; font-weight: bold; }
+.stButton>button { width: 100%; background-color: #FF4B4B; color: white; font-weight: bold; border: none; }
+.report-box { padding: 20px; border: 1px solid #333; border-radius: 10px; background-color: #1A1C24; }
+</style>
 """, unsafe_allow_html=True)
 
-# --- 2. EVENT PROFILES & ANGLE CALCULATION ---
+# --- 2. EVENT CONFIG ---
 EVENT_PROFILES = {
     "Hammer (Light/Heavy)": {"ideal": (38, 44), "tip": "Maximize orbit! Keep arms fully extended during the winds."},
     "WOB (Weight for Height)": {"ideal": (75, 88), "tip": "Vertical drive! Don't let the weight pull your chest down."},
@@ -57,7 +58,7 @@ def create_pdf(event, angle, status, tip):
     pdf.multi_cell(0, 10, txt=f"Coach's Feedback: {tip}")
     return pdf.output(dest='S').encode('latin-1')
 
-# --- 4. SIDEBAR INTERFACE ---
+# --- 4. SIDEBAR ---
 with st.sidebar:
     st.title("🛡️ Coach's Panel")
     event_choice = st.selectbox("Select Event", list(EVENT_PROFILES.keys()))
@@ -67,17 +68,13 @@ with st.sidebar:
 st.title("Highland Games AI Performance Lab")
 u_user = st.file_uploader("Upload Your Throw", type=["mp4", "mov"])
 
-# --- 5. INIT MEDIAPIPE POSE ---
-mp_pose = mp.solutions.pose
-mp_drawing = mp.solutions.drawing_utils
+# --- 5. INIT MEDIAPIPE POSE LANDMARKER ---
+MODEL_PATH = "pose_landmarker_lite.task"  # Make sure this model exists in project
+base_options = BaseOptions(model_asset_path=MODEL_PATH)
+pose_options = PoseLandmarkerOptions(base_options=base_options, running_mode=vision.RunningMode.VIDEO)
+pose_landmarker = PoseLandmarker.create_from_options(pose_options)
 
-pose = mp_pose.Pose(
-    static_image_mode=False,
-    min_detection_confidence=0.7,
-    min_tracking_confidence=0.7
-)
-
-# --- 6. VIDEO PROCESSING ---
+# --- 6. PROCESS VIDEO ---
 if u_user:
     t_u = tempfile.NamedTemporaryFile(delete=False)
     t_u.write(u_user.read())
@@ -89,23 +86,30 @@ if u_user:
             cap = cv2.VideoCapture(t_u.name)
             st_vid = st.empty()
             peak_angle, peak_frame = 0, None
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30
 
             while cap.isOpened():
                 ret, frame = cap.read()
-                if not ret: 
-                    break
-
+                if not ret: break
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                result = pose.process(rgb)
 
+                # --- PoseLandmarker detection ---
+                result = pose_landmarker.detect_for_video(
+                    rgb,
+                    timestamp_ms=int(cap.get(cv2.CAP_PROP_POS_MSEC))
+                )
+
+                # --- Draw landmarks manually ---
                 if result.pose_landmarks:
-                    mp_drawing.draw_landmarks(
-                        frame, 
-                        result.pose_landmarks, 
-                        mp_pose.POSE_CONNECTIONS
-                    )
-                    lm = result.pose_landmarks.landmark
-                    s, h, k = [lm[12].x, lm[12].y], [lm[24].x, lm[24].y], [lm[26].x, lm[26].y]
+                    landmarks = result.pose_landmarks
+                    # Example: draw circles for hips and knees
+                    for lm in landmarks:
+                        x, y = int(lm.x * frame.shape[1]), int(lm.y * frame.shape[0])
+                        cv2.circle(frame, (x, y), 5, (0, 255, 0), -1)
+                    # Calculate angle for right hip-knee-ankle
+                    s = [landmarks[12].x * frame.shape[1], landmarks[12].y * frame.shape[0]]  # hip
+                    h = [landmarks[24].x * frame.shape[1], landmarks[24].y * frame.shape[0]]  # knee
+                    k = [landmarks[26].x * frame.shape[1], landmarks[26].y * frame.shape[0]]  # ankle
                     ang = calculate_angle(s, h, k)
                     if ang > peak_angle:
                         peak_angle, peak_frame = ang, frame.copy()
@@ -119,10 +123,8 @@ if u_user:
             with col_data:
                 st.subheader("Session Results")
                 st.metric("Peak Angle", f"{int(peak_angle)}°")
-
                 low, high = EVENT_PROFILES[event_choice]["ideal"]
                 status = "OPTIMAL" if low <= peak_angle <= high else "ADJUSTMENT NEEDED"
-
                 st.write(f"**Status:** {status}")
                 st.info(f"**Tip:** {EVENT_PROFILES[event_choice]['tip']}")
 
