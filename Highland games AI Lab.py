@@ -5,6 +5,7 @@ import tempfile
 import time
 from fpdf import FPDF
 from datetime import datetime
+import mediapipe as mp
 
 # --- Mediapipe Tasks API ---
 from mediapipe.tasks.python import vision
@@ -118,8 +119,14 @@ if uploaded_file:
 
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
+                # ✅ REQUIRED mp.Image WRAP (FIX)
+                mp_image = mp.Image(
+                    image_format=mp.ImageFormat.SRGB,
+                    data=frame_rgb
+                )
+
                 result = pose_landmarker.detect_for_video(
-                    frame_rgb,
+                    mp_image,
                     timestamp_ms=int(cap.get(cv2.CAP_PROP_POS_MSEC))
                 )
 
@@ -127,7 +134,7 @@ if uploaded_file:
                     landmarks = [(lm.x, lm.y) for lm in result.pose_landmarks[0]]
                     h, w, _ = frame.shape
 
-                    # Draw skeleton connections
+                    # Draw connections
                     for connection in PoseLandmarker.POSE_CONNECTIONS:
                         start = landmarks[connection[0]]
                         end = landmarks[connection[1]]
@@ -183,3 +190,4 @@ if uploaded_file:
                 file_name="highland_report.pdf",
                 mime="application/pdf"
             )
+
