@@ -6,8 +6,7 @@ import cv2
 import tempfile
 import numpy as np
 import mediapipe as mp
-import requests
-import json
+from openai import OpenAI
 
 # -----------------------------
 # PAGE CONFIG
@@ -36,68 +35,52 @@ event = st.selectbox(
 # SIDEBAR COACHING PANEL
 # -----------------------------
 st.sidebar.title("AI Coaching Panel")
-st.sidebar.write("AI feedback will appear here after analysis.")
 coaching_output = st.sidebar.empty()
 
 # -----------------------------
-# OPENAI API KEY
+# OPENAI SETUP
 # -----------------------------
-OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
+api_key = st.secrets.get("OPENAI_API_KEY")
+
+client = None
+if api_key:
+    client = OpenAI(api_key=api_key)
 
 # -----------------------------
-# CHATGPT FEEDBACK FUNCTION
+# AI COACH FUNCTION
 # -----------------------------
 def get_ai_feedback(event, metrics):
 
-    if OPENAI_API_KEY == "":
-        return "OpenAI API key not configured."
+    if client is None:
+        return "⚠️ OpenAI API key not configured."
 
     prompt = f"""
 You are a professional Highland Games throwing coach.
 
 Event: {event}
 
-Athlete metrics from pose analysis:
+Pose analysis metrics:
 {metrics}
 
 Provide coaching feedback including:
 
-1. What the athlete did well
-2. Technical issues
-3. How to fix them
-4. Drills to improve
+• What the athlete did well  
+• Technical mistakes  
+• How to fix them  
+• Specific drills to improve
 """
-
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
-    payload = {
-        "model": "gpt-4o-mini",
-        "messages": [
-            {"role": "user", "content": prompt}
-        ]
-    }
 
     try:
 
-        r = requests.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=30
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role":"user","content":prompt}]
         )
 
-        if r.status_code == 200:
-            return r.json()["choices"][0]["message"]["content"]
-
-        else:
-            return f"OpenAI error: {r.text}"
+        return response.choices[0].message.content
 
     except Exception as e:
-        return f"AI request failed: {str(e)}"
-
+        return f"AI error: {str(e)}"
 
 # -----------------------------
 # MEDIAPIPE SETUP
@@ -114,20 +97,23 @@ pose = mp_pose.Pose(
 )
 
 # -----------------------------
-# VIDEO UPLOADER
+# VIDEO UPLOAD
 # -----------------------------
-uploaded_file = st.file_uploader("Upload Throw Video", type=["mp4", "mov", "avi"])
+uploaded_file = st.file_uploader(
+    "Upload Throw Video",
+    type=["mp4","mov","avi"]
+)
 
 if uploaded_file is not None:
 
-    # Save uploaded video
-    tfile = tempfile.NamedTemporaryFile(delete=False)
-    tfile.write(uploaded_file.read())
-    video_path = tfile.name
+    temp_video = tempfile.NamedTemporaryFile(delete=False)
+    temp_video.write(uploaded_file.read())
+
+    video_path = temp_video.name
 
     st.subheader("Original Video")
 
-    original_bytes = open(video_path, "rb").read()
+    original_bytes = open(video_path,"rb").read()
     st.video(original_bytes)
 
     cap = cv2.VideoCapture(video_path)
@@ -142,7 +128,7 @@ if uploaded_file is not None:
         output_file.name,
         cv2.VideoWriter_fourcc(*'mp4v'),
         fps,
-        (width, height)
+        (width,height)
     )
 
     hip_angles = []
@@ -154,7 +140,7 @@ if uploaded_file is not None:
     progress = st.progress(0)
 
 # -----------------------------
-# VIDEO PROCESSING LOOP
+# FRAME ANALYSIS LOOP
 # -----------------------------
     while cap.isOpened():
 
@@ -179,20 +165,20 @@ if uploaded_file is not None:
 
             lm = results.pose_landmarks.landmark
 
-            shoulder = np.array([lm[11].x, lm[11].y])
-            hip = np.array([lm[23].x, lm[23].y])
-            knee = np.array([lm[25].x, lm[25].y])
+            shoulder = np.array([lm[11].x,lm[11].y])
+            hip = np.array([lm[23].x,lm[23].y])
+            knee = np.array([lm[25].x,lm[25].y])
 
             a = shoulder - hip
             b = knee - hip
 
-            cosine = np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+            cosine = np.dot(a,b) / (np.linalg.norm(a)*np.linalg.norm(b))
             hip_angle = np.degrees(np.arccos(cosine))
 
             hip_angles.append(hip_angle)
 
-            left_shoulder = np.array([lm[11].x, lm[11].y])
-            right_shoulder = np.array([lm[12].x, lm[12].y])
+            left_shoulder = np.array([lm[11].x,lm[11].y])
+            right_shoulder = np.array([lm[12].x,lm[12].y])
 
             shoulder_line = right_shoulder - left_shoulder
 
@@ -210,57 +196,58 @@ if uploaded_file is not None:
     out.release()
 
 # -----------------------------
-# DISPLAY SKELETON VIDEO
+# SHOW SKELETON VIDEO
 # -----------------------------
-    st.subheader("Skeleton Overlay Video")
+    st.subheader("Skeleton Overlay")
 
-    video_bytes = open(output_file.name, "rb").read()
-    st.video(video_bytes)
+    overlay_bytes = open(output_file.name,"rb").read()
+    st.video(overlay_bytes)
 
 # -----------------------------
-# METRICS
+# METRICS DISPLAY
 # -----------------------------
     if len(hip_angles) > 0:
 
         peak_hip = max(hip_angles)
         avg_hip = np.mean(hip_angles)
 
-        peak_rotation = max(shoulder_angles)
-        avg_rotation = np.mean(shoulder_angles)
+        peak_rot = max(shoulder_angles)
+        avg_rot = np.mean(shoulder_angles)
 
         st.subheader("Throw Metrics")
 
-        col1, col2, col3, col4 = st.columns(4)
+        col1,col2,col3,col4 = st.columns(4)
 
-        col1.metric("Peak Hip Angle", f"{peak_hip:.1f}°")
-        col2.metric("Average Hip Angle", f"{avg_hip:.1f}°")
-        col3.metric("Peak Shoulder Rotation", f"{peak_rotation:.1f}°")
-        col4.metric("Avg Shoulder Rotation", f"{avg_rotation:.1f}°")
+        col1.metric("Peak Hip Angle",f"{peak_hip:.1f}°")
+        col2.metric("Avg Hip Angle",f"{avg_hip:.1f}°")
+        col3.metric("Peak Shoulder Rotation",f"{peak_rot:.1f}°")
+        col4.metric("Avg Shoulder Rotation",f"{avg_rot:.1f}°")
 
-        st.subheader("Hip Drive Graph")
+        st.subheader("Hip Drive Chart")
         st.line_chart(hip_angles)
 
-        st.subheader("Shoulder Rotation Graph")
+        st.subheader("Shoulder Rotation Chart")
         st.line_chart(shoulder_angles)
 
         metrics = {
-            "event": event,
-            "peak_hip_angle": float(peak_hip),
-            "avg_hip_angle": float(avg_hip),
-            "peak_shoulder_rotation": float(peak_rotation),
-            "avg_shoulder_rotation": float(avg_rotation),
-            "frames_analyzed": len(hip_angles)
+            "event":event,
+            "peak_hip_angle":float(peak_hip),
+            "avg_hip_angle":float(avg_hip),
+            "peak_shoulder_rotation":float(peak_rot),
+            "avg_shoulder_rotation":float(avg_rot),
+            "frames_analyzed":len(hip_angles)
         }
 
 # -----------------------------
-# CHATGPT COACHING FEEDBACK
+# AI COACHING FEEDBACK
 # -----------------------------
         st.subheader("AI Coaching Feedback")
 
-        feedback = get_ai_feedback(event, metrics)
+        feedback = get_ai_feedback(event,metrics)
 
         st.write(feedback)
         coaching_output.write(feedback)
 
     else:
+
         st.error("Pose not detected. Try a clearer video.")
