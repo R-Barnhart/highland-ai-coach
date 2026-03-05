@@ -1,226 +1,149 @@
-# ============================================
-# HIGHLAND GAMES AI COACH
-# Professional Version
-# ============================================
-
-import os
-
-# ---- FORCE CPU MODE (Fix EGL crash) ----
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
-os.environ["MEDIAPIPE_DISABLE_GPU"] = "true"
-os.environ["GLOG_minloglevel"] = "2"
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
-
 import streamlit as st
 import cv2
-import mediapipe as mp
 import numpy as np
 import tempfile
-from openai import OpenAI
+import os
+from PIL import Image
+from mediapipe.tasks.python import vision
+from mediapipe.tasks.python.vision import PoseLandmarker
+from mediapipe.tasks.python.vision.core import BaseOptions, RunningMode
+import openai
 
-# ============================================
-# STREAMLIT PAGE
-# ============================================
-
-st.set_page_config(
-    page_title="Highland Games AI Coach",
-    layout="wide"
+# -----------------------------
+# FRONTEND CONFIGURATION
+# -----------------------------
+st.set_page_config(page_title="Highland Games AI Lab", layout="wide")
+st.title("Highland Games AI Performance Lab")
+st.write(
+    """
+Upload your throw video, select the event, and get AI feedback along with skeleton overlay.
+"""
 )
 
-st.title("🏴 Highland Games AI Coach")
-
-st.markdown("Upload a throwing video to receive AI coaching feedback.")
-
-# ============================================
-# OPENAI CLIENT
-# ============================================
-
-try:
-    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-except:
-    client = None
-
-# ============================================
-# EVENT SELECTOR
-# ============================================
-
+# -----------------------------
+# USER INPUTS
+# -----------------------------
 event = st.selectbox(
     "Select Event",
-    [
-        "Weight Over Bar (WOB)",
-        "Weight For Distance (WFD)",
-        "Hammer Throw",
-        "Stone Throw",
-        "Caber Toss",
-        "Sheaf Toss"
+    ["WOB", "WFD", "Hammer", "Stones", "Caber", "Sheaf"]
+)
+
+uploaded_video = st.file_uploader("Upload Your Throw Video", type=["mp4", "mov"])
+
+# -----------------------------
+# ENVIRONMENT FIXES (CPU ONLY)
+# -----------------------------
+# Disable GPU to prevent EGL/GL errors
+os.environ["MEDIAPIPE_DISABLE_GPU"] = "true"
+
+# -----------------------------
+# MEDIAPIPE TASKS SETUP
+# -----------------------------
+MODEL_PATH = "pose_landmarker_lite.task"  # Make sure the model file exists
+
+base_options = BaseOptions(model_asset_path=MODEL_PATH)
+pose_options = PoseLandmarker.PoseLandmarkerOptions(
+    base_options=base_options,
+    running_mode=RunningMode.VIDEO
+)
+
+pose_landmarker = PoseLandmarker.create_from_options(pose_options)
+
+# -----------------------------
+# HELPER FUNCTIONS
+# -----------------------------
+def draw_skeleton(frame, landmarks):
+    h, w, _ = frame.shape
+    # Simple skeleton connections (pairs of indices)
+    connections = [
+        (0, 1), (1, 2), (2, 3),  # Example connections, adapt to full model
+        (0, 4), (4, 5), (5, 6),
+        (0, 7), (7, 8), (8, 9)
     ]
-)
+    for start_idx, end_idx in connections:
+        if start_idx < len(landmarks) and end_idx < len(landmarks):
+            x1, y1 = int(landmarks[start_idx][0] * w), int(landmarks[start_idx][1] * h)
+            x2, y2 = int(landmarks[end_idx][0] * w), int(landmarks[end_idx][1] * h)
+            cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+    for lm in landmarks:
+        cx, cy = int(lm[0] * w), int(lm[1] * h)
+        cv2.circle(frame, (cx, cy), 4, (0, 0, 255), -1)
+    return frame
 
-uploaded_video = st.file_uploader("Upload Throw Video", type=["mp4", "mov", "avi"])
+def get_ai_feedback(metrics_dict, event):
+    prompt = f"""
+Analyze the following throw data for {event}:
+{metrics_dict}
 
-# ============================================
-# MEDIAPIPE SETUP (CPU SAFE)
-# ============================================
+Provide concise, actionable feedback to improve performance.
+"""
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.5
+        )
+        return response.choices[0].message.content
+    except Exception:
+        return "AI feedback unavailable."
 
-mp_pose = mp.solutions.pose
-mp_drawing = mp.solutions.drawing_utils
-
-pose = mp_pose.Pose(
-    static_image_mode=False,
-    model_complexity=0,
-    smooth_landmarks=True,
-    enable_segmentation=False,
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
-)
-
-# ============================================
-# POSE DRAWING STYLE
-# ============================================
-
-skeleton_style = mp_drawing.DrawingSpec(
-    color=(0,255,0),
-    thickness=3,
-    circle_radius=3
-)
-
-joint_style = mp_drawing.DrawingSpec(
-    color=(255,0,0),
-    thickness=3,
-    circle_radius=4
-)
-
-# ============================================
+# -----------------------------
 # VIDEO PROCESSING
-# ============================================
+# -----------------------------
+if uploaded_video:
+    # Save uploaded file temporarily
+    tfile = tempfile.NamedTemporaryFile(delete=False)
+    tfile.write(uploaded_video.read())
+    cap = cv2.VideoCapture(tfile.name)
 
-def process_video(video_path):
-
-    cap = cv2.VideoCapture(video_path)
-
+    # Prepare video writer for overlay output
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
-
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     output_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    out = cv2.VideoWriter(output_file.name, fourcc, fps, (width, height))
 
-    out = cv2.VideoWriter(
-        output_file.name,
-        cv2.VideoWriter_fourcc(*"avc1"),
-        fps,
-        (width, height)
-    )
-
+    peak_angle = 0
     frame_count = 0
-    pose_points = []
-
-    while cap.isOpened():
-
-        success, frame = cap.read()
-
-        if not success:
+    while True:
+        ret, frame = cap.read()
+        if not ret:
             break
 
-        frame_count += 1
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        result = pose_landmarker.detect_for_video(frame_rgb, int(cap.get(cv2.CAP_PROP_POS_MSEC)))
 
-        image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = pose.process(image)
-
-        if results.pose_landmarks:
-
-            mp_drawing.draw_landmarks(
-                frame,
-                results.pose_landmarks,
-                mp_pose.POSE_CONNECTIONS,
-                skeleton_style,
-                joint_style
-            )
-
-            pose_points.append(str(results.pose_landmarks))
+        if result.pose_landmarks:
+            landmarks = [(lm.x, lm.y) for lm in result.pose_landmarks.landmark]
+            frame = draw_skeleton(frame, landmarks)
+            # Example metric calculation: track peak hip angle (simplified)
+            hip_angle = 0
+            if len(landmarks) > 12:
+                hip_angle = np.degrees(np.arctan2(
+                    landmarks[12][1]-landmarks[24][1],
+                    landmarks[12][0]-landmarks[24][0]
+                ))
+            if hip_angle > peak_angle:
+                peak_angle = hip_angle
 
         out.write(frame)
+        frame_count += 1
 
     cap.release()
     out.release()
 
-    return output_file.name, frame_count, pose_points
+    # -----------------------------
+    # STREAMLIT VIDEO DISPLAY
+    # -----------------------------
+    st.subheader("Skeleton Overlay Video")
+    video_file = open(output_file.name, 'rb').read()
+    st.video(video_file)
 
-
-# ============================================
-# AI COACHING
-# ============================================
-
-def ai_coach(event, frames):
-
-    if client is None:
-        return "⚠️ AI feedback unavailable. Add OPENAI_API_KEY to Streamlit secrets."
-
-    prompt = f"""
-You are a professional Highland Games throwing coach.
-
-Analyze the athlete motion data and provide coaching advice.
-
-Event: {event}
-
-Focus on:
-
-- footwork
-- hip drive
-- timing
-- release angle
-- balance
-- power transfer
-
-Provide:
-1. What the athlete did well
-2. Technical mistakes
-3. Specific corrections
-"""
-
-    try:
-
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role":"system","content":"You are an elite Highland Games coach."},
-                {"role":"user","content":prompt}
-            ]
-        )
-
-        return response.choices[0].message.content
-
-    except Exception as e:
-        return f"AI error: {str(e)}"
-
-# ============================================
-# RUN ANALYSIS
-# ============================================
-
-if uploaded_video:
-
-    st.subheader("Original Video")
-    st.video(uploaded_video)
-
-    with tempfile.NamedTemporaryFile(delete=False) as temp_file:
-        temp_file.write(uploaded_video.read())
-        video_path = temp_file.name
-
-    if st.button("Analyze Throw"):
-
-        with st.spinner("Analyzing throw mechanics..."):
-
-            overlay_video, frame_count, frames = process_video(video_path)
-
-            feedback = ai_coach(event, frames)
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.subheader("Skeleton Overlay")
-            st.video(overlay_video)
-
-        with col2:
-            st.subheader("AI Coaching Feedback")
-            st.write(feedback)
-
-        st.success(f"Processed {frame_count} frames successfully.")
+    # -----------------------------
+    # COACHING PANEL
+    # -----------------------------
+    st.subheader("AI Coaching Feedback")
+    metrics = {"peak_hip_angle": int(peak_angle)}
+    feedback = get_ai_feedback(metrics, event)
+    st.text(feedback)
