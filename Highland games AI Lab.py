@@ -4,12 +4,12 @@ import numpy as np
 import tempfile
 import sqlite3
 import mediapipe as mp
-from datetime import datetime
 import pandas as pd
+from datetime import datetime
 import openai
 
 # -----------------------
-# PAGE CONFIG
+# PAGE SETUP
 # -----------------------
 
 st.set_page_config(
@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS throws(
 id INTEGER PRIMARY KEY AUTOINCREMENT,
 date TEXT,
 hip_drive REAL,
-shoulder_rotation REAL,
+rotation REAL,
 balance REAL
 )
 """)
@@ -39,18 +39,18 @@ balance REAL
 conn.commit()
 
 # -----------------------
-# MEDIAPIPE MODEL
+# MEDIAPIPE SETUP
 # -----------------------
-
-MODEL_PATH = "pose_landmarker_lite.task"
 
 from mediapipe.tasks.python.vision import PoseLandmarker
 from mediapipe.tasks.python.vision import PoseLandmarkerOptions
 from mediapipe.tasks.python.vision import RunningMode
 from mediapipe.tasks.python.core.base_options import BaseOptions
 
+MODEL_PATH = "pose_landmarker_lite.task"
+
 @st.cache_resource
-def load_pose_model():
+def load_model():
 
     options = PoseLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=MODEL_PATH),
@@ -59,23 +59,17 @@ def load_pose_model():
 
     return PoseLandmarker.create_from_options(options)
 
-pose_model = load_pose_model()
+pose_model = load_model()
+
+# Skeleton connections
+mp_pose = mp.solutions.pose
+connections = mp_pose.POSE_CONNECTIONS
 
 # -----------------------
 # VIDEO UPLOAD
 # -----------------------
 
 uploaded_file = st.file_uploader("Upload Throw Video")
-
-# -----------------------
-# METRICS
-# -----------------------
-
-metrics = {
-    "hip_drive": [],
-    "rotation": [],
-    "balance": []
-}
 
 # -----------------------
 # PROCESS VIDEO
@@ -88,6 +82,14 @@ if uploaded_file:
 
     cap = cv2.VideoCapture(tfile.name)
 
+    stframe = st.empty()
+
+    metrics = {
+        "hip_drive": [],
+        "rotation": [],
+        "balance": []
+    }
+
     frame_count = 0
 
     while cap.isOpened():
@@ -97,9 +99,15 @@ if uploaded_file:
         if not ret:
             break
 
+        # Skip frames for speed
+        if frame_count % 3 != 0:
+            frame_count += 1
+            continue
+
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        timestamp = int(cap.get(cv2.CAP_PROP_POS_MSEC))
+        # FIXED timestamp
+        timestamp = frame_count * 33
 
         mp_image = mp.Image(
             image_format=mp.ImageFormat.SRGB,
@@ -115,26 +123,65 @@ if uploaded_file:
 
             landmarks = result.pose_landmarks[0]
 
+            # Extract important joints
             hip = landmarks[24]
             shoulder = landmarks[12]
             ankle = landmarks[28]
 
             hip_drive = abs(hip.x - shoulder.x)
-
             rotation = abs(shoulder.z)
-
             balance = abs(hip.x - ankle.x)
 
             metrics["hip_drive"].append(hip_drive)
             metrics["rotation"].append(rotation)
             metrics["balance"].append(balance)
 
+            # -----------------------
+            # DRAW SKELETON
+            # -----------------------
+
+            h, w, _ = frame.shape
+
+            points = []
+
+            for lm in landmarks:
+                x = int(lm.x * w)
+                y = int(lm.y * h)
+                points.append((x, y))
+
+            for connection in connections:
+
+                start = connection[0]
+                end = connection[1]
+
+                if start < len(points) and end < len(points):
+
+                    cv2.line(
+                        frame,
+                        points[start],
+                        points[end],
+                        (0,255,0),
+                        2
+                    )
+
+            for point in points:
+
+                cv2.circle(
+                    frame,
+                    point,
+                    4,
+                    (0,0,255),
+                    -1
+                )
+
+        stframe.image(frame, channels="BGR")
+
         frame_count += 1
 
     cap.release()
 
 # -----------------------
-# CALCULATE RESULTS
+# METRICS
 # -----------------------
 
     avg_hip = np.mean(metrics["hip_drive"])
@@ -156,7 +203,7 @@ if uploaded_file:
     if st.button("Save Throw"):
 
         c.execute("""
-        INSERT INTO throws(date, hip_drive, shoulder_rotation, balance)
+        INSERT INTO throws(date, hip_drive, rotation, balance)
         VALUES(?,?,?,?)
         """,(
             datetime.now().strftime("%Y-%m-%d"),
@@ -167,22 +214,22 @@ if uploaded_file:
 
         conn.commit()
 
-        st.success("Throw saved")
+        st.success("Throw saved!")
 
 # -----------------------
-# AI COACH FEEDBACK
+# AI COACH
 # -----------------------
 
-    if st.button("AI Coaching Feedback"):
+    if st.button("Generate AI Coaching"):
 
         prompt = f"""
-        Athlete biomechanics data:
+        Highland Games athlete metrics:
 
         Hip Drive: {avg_hip}
-        Shoulder Rotation: {avg_rotation}
+        Rotation: {avg_rotation}
         Balance: {avg_balance}
 
-        Provide Highland Games coaching advice.
+        Provide coaching feedback and drills.
         """
 
         response = openai.ChatCompletion.create(
@@ -192,7 +239,7 @@ if uploaded_file:
 
         feedback = response["choices"][0]["message"]["content"]
 
-        st.subheader("AI Coach")
+        st.subheader("AI Coach Feedback")
 
         st.write(feedback)
 
@@ -209,13 +256,14 @@ df = pd.read_sql_query(
 
 if len(df) > 0:
 
-    st.line_chart(df[["hip_drive"]])
-    st.line_chart(df[["shoulder_rotation"]])
-    st.line_chart(df[["balance"]])
+    st.line_chart(df["hip_drive"])
+    st.line_chart(df["rotation"])
+    st.line_chart(df["balance"])
 
     st.dataframe(df)
 
 else:
-    st.info("No throws saved yet.")
+
+    st.info("No throws recorded yet.")
 
 
