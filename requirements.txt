@@ -3,6 +3,7 @@ mediapipe==0.10.32
 opencv-python-headless>=4.6.0
 numpy>=1.23.0
 fpdf>=1.7.2
+requests
 
 
 
