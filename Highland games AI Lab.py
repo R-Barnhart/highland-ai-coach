@@ -6,144 +6,129 @@ import os
 from PIL import Image
 from mediapipe.tasks.python import vision
 from mediapipe.tasks.python.vision import PoseLandmarker
-from mediapipe.tasks.python.vision.core import BaseOptions, RunningMode
+from mediapipe.tasks.python.core.base_options import BaseOptions
+from mediapipe.tasks.python.vision.core import RunningMode
 import openai
 
 # -----------------------------
-# FRONTEND CONFIGURATION
+# 1. FRONTEND CONFIGURATION
 # -----------------------------
 st.set_page_config(page_title="Highland Games AI Lab", layout="wide")
-st.title("Highland Games AI Performance Lab")
-st.write(
-    """
-Upload your throw video, select the event, and get AI feedback along with skeleton overlay.
-"""
-)
+st.title("🏴 Highland Games AI Performance Lab")
+
+# Instructions
+st.markdown("""
+Upload a video of your throw. The app will analyze your throw, overlay a skeleton, 
+and provide AI coaching feedback.
+""")
 
 # -----------------------------
-# USER INPUTS
+# 2. OPENAI SETUP
+# -----------------------------
+OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY")  # Or set your key in env
+openai.api_key = OPENAI_API_KEY
+
+# -----------------------------
+# 3. EVENT SELECTION
 # -----------------------------
 event = st.selectbox(
-    "Select Event",
+    "Select your event:",
     ["WOB", "WFD", "Hammer", "Stones", "Caber", "Sheaf"]
 )
 
-uploaded_video = st.file_uploader("Upload Your Throw Video", type=["mp4", "mov"])
+# -----------------------------
+# 4. VIDEO UPLOAD
+# -----------------------------
+uploaded_file = st.file_uploader("Upload Your Throw Video", type=["mp4", "mov"])
+if uploaded_file is not None:
+    tfile = tempfile.NamedTemporaryFile(delete=False)
+    tfile.write(uploaded_file.read())
+    video_path = tfile.name
+    st.video(video_path)
 
 # -----------------------------
-# ENVIRONMENT FIXES (CPU ONLY)
+# 5. MEDIAPIPE SETUP (CPU SAFE)
 # -----------------------------
-# Disable GPU to prevent EGL/GL errors
-os.environ["MEDIAPIPE_DISABLE_GPU"] = "true"
-
-# -----------------------------
-# MEDIAPIPE TASKS SETUP
-# -----------------------------
-MODEL_PATH = "pose_landmarker_lite.task"  # Make sure the model file exists
-
+MODEL_PATH = "pose_landmarker_lite.task"  # Ensure this file exists in project folder
 base_options = BaseOptions(model_asset_path=MODEL_PATH)
 pose_options = PoseLandmarker.PoseLandmarkerOptions(
     base_options=base_options,
     running_mode=RunningMode.VIDEO
 )
-
 pose_landmarker = PoseLandmarker.create_from_options(pose_options)
 
 # -----------------------------
-# HELPER FUNCTIONS
+# 6. VIDEO PROCESSING & SKELETON OVERLAY
 # -----------------------------
-def draw_skeleton(frame, landmarks):
-    h, w, _ = frame.shape
-    # Simple skeleton connections (pairs of indices)
-    connections = [
-        (0, 1), (1, 2), (2, 3),  # Example connections, adapt to full model
-        (0, 4), (4, 5), (5, 6),
-        (0, 7), (7, 8), (8, 9)
-    ]
-    for start_idx, end_idx in connections:
-        if start_idx < len(landmarks) and end_idx < len(landmarks):
-            x1, y1 = int(landmarks[start_idx][0] * w), int(landmarks[start_idx][1] * h)
-            x2, y2 = int(landmarks[end_idx][0] * w), int(landmarks[end_idx][1] * h)
-            cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-    for lm in landmarks:
-        cx, cy = int(lm[0] * w), int(lm[1] * h)
-        cv2.circle(frame, (cx, cy), 4, (0, 0, 255), -1)
-    return frame
+def process_video(video_file):
+    cap = cv2.VideoCapture(video_file)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_list = []
 
-def get_ai_feedback(metrics_dict, event):
-    prompt = f"""
-Analyze the following throw data for {event}:
-{metrics_dict}
-
-Provide concise, actionable feedback to improve performance.
-"""
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.5
-        )
-        return response.choices[0].message.content
-    except Exception:
-        return "AI feedback unavailable."
-
-# -----------------------------
-# VIDEO PROCESSING
-# -----------------------------
-if uploaded_video:
-    # Save uploaded file temporarily
-    tfile = tempfile.NamedTemporaryFile(delete=False)
-    tfile.write(uploaded_video.read())
-    cap = cv2.VideoCapture(tfile.name)
-
-    # Prepare video writer for overlay output
-    fps = int(cap.get(cv2.CAP_PROP_FPS))
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    output_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-    out = cv2.VideoWriter(output_file.name, fourcc, fps, (width, height))
-
-    peak_angle = 0
-    frame_count = 0
     while True:
         ret, frame = cap.read()
         if not ret:
             break
-
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         result = pose_landmarker.detect_for_video(frame_rgb, int(cap.get(cv2.CAP_PROP_POS_MSEC)))
 
         if result.pose_landmarks:
-            landmarks = [(lm.x, lm.y) for lm in result.pose_landmarks.landmark]
-            frame = draw_skeleton(frame, landmarks)
-            # Example metric calculation: track peak hip angle (simplified)
-            hip_angle = 0
-            if len(landmarks) > 12:
-                hip_angle = np.degrees(np.arctan2(
-                    landmarks[12][1]-landmarks[24][1],
-                    landmarks[12][0]-landmarks[24][0]
-                ))
-            if hip_angle > peak_angle:
-                peak_angle = hip_angle
+            h, w, _ = frame.shape
+            for landmark in result.pose_landmarks:
+                cx, cy = int(landmark.x * w), int(landmark.y * h)
+                cv2.circle(frame, (cx, cy), 5, (0, 255, 0), -1)
 
-        out.write(frame)
-        frame_count += 1
+        frame_list.append(frame)
 
     cap.release()
+    return frame_list, fps
+
+processed_frames = []
+if uploaded_file:
+    processed_frames, fps = process_video(video_path)
+    st.success("Pose detection complete!")
+
+# -----------------------------
+# 7. AI FEEDBACK PANEL
+# -----------------------------
+def generate_feedback(event_name, num_frames):
+    if not OPENAI_API_KEY:
+        return "AI feedback unavailable: API key not set."
+    prompt = (
+        f"You are a Highland Games coach AI. Analyze a {event_name} throw. "
+        f"The throw has {num_frames} video frames analyzed. Give detailed feedback on posture, "
+        "technique, and recommendations for improvement."
+    )
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"AI feedback unavailable: {str(e)}"
+
+if uploaded_file:
+    with st.expander("AI Coaching Feedback"):
+        feedback = generate_feedback(event, len(processed_frames))
+        st.write(feedback)
+
+# -----------------------------
+# 8. DISPLAY SKELETON VIDEO
+# -----------------------------
+if processed_frames:
+    st.subheader("Skeleton Overlay Video Preview")
+    video_temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    h, w, _ = processed_frames[0].shape
+    out = cv2.VideoWriter(video_temp_file.name, fourcc, fps, (w, h))
+
+    for f in processed_frames:
+        out.write(f)
     out.release()
 
-    # -----------------------------
-    # STREAMLIT VIDEO DISPLAY
-    # -----------------------------
-    st.subheader("Skeleton Overlay Video")
-    video_file = open(output_file.name, 'rb').read()
-    st.video(video_file)
+    video_bytes = open(video_temp_file.name, 'rb').read()
+    st.video(video_bytes)
+)
 
-    # -----------------------------
-    # COACHING PANEL
-    # -----------------------------
-    st.subheader("AI Coaching Feedback")
-    metrics = {"peak_hip_angle": int(peak_angle)}
-    feedback = get_ai_feedback(metrics, event)
-    st.text(feedback)
