@@ -1,58 +1,56 @@
 import streamlit as st
 import cv2
 import numpy as np
-import sqlite3
 import tempfile
-import os
-import math
+import sqlite3
+import mediapipe as mp
+from datetime import datetime
 import pandas as pd
 import openai
+
+# -----------------------
+# PAGE CONFIG
+# -----------------------
+
+st.set_page_config(
+    page_title="Highland Games AI Coach",
+    layout="wide"
+)
+
+st.title("🏴 Highland Games AI Coach")
+
+# -----------------------
+# DATABASE
+# -----------------------
+
+conn = sqlite3.connect("throws.db", check_same_thread=False)
+c = conn.cursor()
+
+c.execute("""
+CREATE TABLE IF NOT EXISTS throws(
+id INTEGER PRIMARY KEY AUTOINCREMENT,
+date TEXT,
+hip_drive REAL,
+shoulder_rotation REAL,
+balance REAL
+)
+""")
+
+conn.commit()
+
+# -----------------------
+# MEDIAPIPE MODEL
+# -----------------------
+
+MODEL_PATH = "pose_landmarker_lite.task"
 
 from mediapipe.tasks.python.vision import PoseLandmarker
 from mediapipe.tasks.python.vision import PoseLandmarkerOptions
 from mediapipe.tasks.python.vision import RunningMode
 from mediapipe.tasks.python.core.base_options import BaseOptions
 
-# ----------------------------
-# PAGE CONFIG
-# ----------------------------
-st.set_page_config(page_title="Highland Games AI Coach", layout="wide")
-
-st.title("🏴 Highland Games AI Performance Lab")
-
-# ----------------------------
-# DATABASE
-# ----------------------------
-conn = sqlite3.connect("throws.db", check_same_thread=False)
-cursor = conn.cursor()
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS throws(
-id INTEGER PRIMARY KEY AUTOINCREMENT,
-event TEXT,
-date TEXT,
-hip_drive REAL,
-release_angle REAL,
-rotation_speed REAL,
-separation REAL
-)
-""")
-
-conn.commit()
-
-# ----------------------------
-# OPENAI KEY
-# ----------------------------
-if "OPENAI_API_KEY" in st.secrets:
-    openai.api_key = st.secrets["OPENAI_API_KEY"]
-
-# ----------------------------
-# LOAD POSE MODEL
-# ----------------------------
 @st.cache_resource
-def load_model():
-
-    MODEL_PATH = "pose_landmarker_lite.task"
+def load_pose_model():
 
     options = PoseLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=MODEL_PATH),
@@ -61,229 +59,163 @@ def load_model():
 
     return PoseLandmarker.create_from_options(options)
 
-pose_model = load_model()
+pose_model = load_pose_model()
 
-# ----------------------------
-# EVENT SELECTOR
-# ----------------------------
-event = st.selectbox(
-    "Select Event",
-    ["WOB","WFD","Hammer","Stones","Caber","Sheaf"]
-)
-
-# ----------------------------
+# -----------------------
 # VIDEO UPLOAD
-# ----------------------------
-uploaded = st.file_uploader("Upload Throw Video", type=["mp4","mov"])
+# -----------------------
 
-if uploaded:
+uploaded_file = st.file_uploader("Upload Throw Video")
 
-    temp = tempfile.NamedTemporaryFile(delete=False)
-    temp.write(uploaded.read())
-    video_path = temp.name
+# -----------------------
+# METRICS
+# -----------------------
 
-    st.subheader("Original Video")
-    st.video(video_path)
+metrics = {
+    "hip_drive": [],
+    "rotation": [],
+    "balance": []
+}
 
-    cap = cv2.VideoCapture(video_path)
+# -----------------------
+# PROCESS VIDEO
+# -----------------------
 
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+if uploaded_file:
 
-    out_file = tempfile.NamedTemporaryFile(delete=False,suffix=".mp4")
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(out_file.name,fourcc,fps,(width,height))
+    tfile = tempfile.NamedTemporaryFile(delete=False)
+    tfile.write(uploaded_file.read())
 
-    hip_positions=[]
-    shoulder_angles=[]
-    wrist_speed=[]
-    release_angles=[]
+    cap = cv2.VideoCapture(tfile.name)
 
-    prev_wrist=None
-    frame_count=0
+    frame_count = 0
 
-    while True:
+    while cap.isOpened():
 
-        ret,frame = cap.read()
+        ret, frame = cap.read()
 
         if not ret:
             break
 
-        rgb=cv2.cvtColor(frame,cv2.COLOR_BGR2RGB)
-        timestamp=int(cap.get(cv2.CAP_PROP_POS_MSEC))
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        result=pose_model.detect_for_video(rgb,timestamp)
+        timestamp = int(cap.get(cv2.CAP_PROP_POS_MSEC))
+
+        mp_image = mp.Image(
+            image_format=mp.ImageFormat.SRGB,
+            data=rgb
+        )
+
+        result = pose_model.detect_for_video(
+            mp_image,
+            timestamp
+        )
 
         if result.pose_landmarks:
 
-            lm=result.pose_landmarks
+            landmarks = result.pose_landmarks[0]
 
-            for p in lm:
-                x=int(p.x*width)
-                y=int(p.y*height)
-                cv2.circle(frame,(x,y),4,(0,255,0),-1)
+            hip = landmarks[24]
+            shoulder = landmarks[12]
+            ankle = landmarks[28]
 
-            # HIP DRIVE
-            hip=lm[23]
-            hip_positions.append(hip.y)
+            hip_drive = abs(hip.x - shoulder.x)
 
-            # SHOULDER ROTATION
-            ls=lm[11]
-            rs=lm[12]
+            rotation = abs(shoulder.z)
 
-            angle=math.atan2(
-                rs.y-ls.y,
-                rs.x-ls.x
-            )
+            balance = abs(hip.x - ankle.x)
 
-            shoulder_angles.append(angle)
+            metrics["hip_drive"].append(hip_drive)
+            metrics["rotation"].append(rotation)
+            metrics["balance"].append(balance)
 
-            # WRIST SPEED
-            wrist=lm[16]
-
-            if prev_wrist:
-                dx=wrist.x-prev_wrist.x
-                dy=wrist.y-prev_wrist.y
-                speed=math.sqrt(dx*dx+dy*dy)
-                wrist_speed.append(speed)
-
-            prev_wrist=wrist
-
-            # RELEASE ANGLE
-            elbow=lm[14]
-
-            rel_angle=math.degrees(
-                math.atan2(
-                    wrist.y-elbow.y,
-                    wrist.x-elbow.x
-                )
-            )
-
-            release_angles.append(rel_angle)
-
-        out.write(frame)
-        frame_count+=1
+        frame_count += 1
 
     cap.release()
-    out.release()
 
-    st.subheader("Pose Tracking")
-    st.video(out_file.name)
+# -----------------------
+# CALCULATE RESULTS
+# -----------------------
 
-    # ----------------------------
-    # METRICS
-    # ----------------------------
+    avg_hip = np.mean(metrics["hip_drive"])
+    avg_rotation = np.mean(metrics["rotation"])
+    avg_balance = np.mean(metrics["balance"])
 
-    peak_hip=min(hip_positions) if hip_positions else 0
-    release=np.mean(release_angles) if release_angles else 0
-    separation=np.std(shoulder_angles) if shoulder_angles else 0
+    st.subheader("Biomechanics Metrics")
 
-    rotation_speed=0
+    col1, col2, col3 = st.columns(3)
 
-    if len(shoulder_angles)>5:
-        diffs=np.diff(shoulder_angles)
-        rotation_speed=np.mean(np.abs(diffs))*fps
+    col1.metric("Hip Drive", round(avg_hip,3))
+    col2.metric("Rotation", round(avg_rotation,3))
+    col3.metric("Balance", round(avg_balance,3))
 
-    col1,col2,col3,col4=st.columns(4)
+# -----------------------
+# SAVE THROW
+# -----------------------
 
-    col1.metric("Hip Drive",round(peak_hip,3))
-    col2.metric("Release Angle",round(release,2))
-    col3.metric("Hip-Shoulder Separation",round(separation,3))
-    col4.metric("Rotation Speed",round(rotation_speed,3))
+    if st.button("Save Throw"):
 
-    # ----------------------------
-    # THROW PHASE DETECTION
-    # ----------------------------
+        c.execute("""
+        INSERT INTO throws(date, hip_drive, shoulder_rotation, balance)
+        VALUES(?,?,?,?)
+        """,(
+            datetime.now().strftime("%Y-%m-%d"),
+            float(avg_hip),
+            float(avg_rotation),
+            float(avg_balance)
+        ))
 
-    phase="Unknown"
+        conn.commit()
 
-    if wrist_speed:
+        st.success("Throw saved")
 
-        peak_speed=max(wrist_speed)
+# -----------------------
+# AI COACH FEEDBACK
+# -----------------------
 
-        if peak_speed<0.01:
-            phase="Wind-up"
+    if st.button("AI Coaching Feedback"):
 
-        elif peak_speed<0.03:
-            phase="Rotation"
+        prompt = f"""
+        Athlete biomechanics data:
 
-        elif peak_speed<0.06:
-            phase="Power Phase"
+        Hip Drive: {avg_hip}
+        Shoulder Rotation: {avg_rotation}
+        Balance: {avg_balance}
 
-        else:
-            phase="Release"
+        Provide Highland Games coaching advice.
+        """
 
-    st.subheader("Detected Throw Phase")
-    st.write(phase)
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[{"role":"user","content":prompt}]
+        )
 
-    # ----------------------------
-    # SAVE THROW
-    # ----------------------------
+        feedback = response["choices"][0]["message"]["content"]
 
-    cursor.execute("""
-    INSERT INTO throws(event,date,hip_drive,release_angle,rotation_speed,separation)
-    VALUES(datetime('now'),?,?,?,?,?)
-    """,(event,peak_hip,release,rotation_speed,separation))
+        st.subheader("AI Coach")
 
-    conn.commit()
+        st.write(feedback)
 
-# ----------------------------
-# ATHLETE DASHBOARD
-# ----------------------------
+# -----------------------
+# HISTORY DASHBOARD
+# -----------------------
 
-st.header("📊 Throw History")
+st.header("Throw History")
 
-df=pd.read_sql_query("SELECT * FROM throws",conn)
+df = pd.read_sql_query(
+    "SELECT * FROM throws",
+    conn
+)
 
-if not df.empty:
+if len(df) > 0:
+
+    st.line_chart(df[["hip_drive"]])
+    st.line_chart(df[["shoulder_rotation"]])
+    st.line_chart(df[["balance"]])
 
     st.dataframe(df)
 
-    st.subheader("Progress Charts")
+else:
+    st.info("No throws saved yet.")
 
-    st.line_chart(df["hip_drive"])
-    st.line_chart(df["release_angle"])
-    st.line_chart(df["rotation_speed"])
-
-# ----------------------------
-# AI COACH
-# ----------------------------
-
-st.header("🤖 AI Coaching")
-
-if not df.empty and "OPENAI_API_KEY" in st.secrets:
-
-    latest=df.iloc[-1]
-
-    prompt=f"""
-You are a Highland Games throwing coach.
-
-Event: {latest.event}
-
-Metrics:
-Hip Drive: {latest.hip_drive}
-Release Angle: {latest.release_angle}
-Rotation Speed: {latest.rotation_speed}
-Hip Shoulder Separation: {latest.separation}
-
-Provide:
-• Technique critique
-• Power generation advice
-• 3 training drills
-"""
-
-    try:
-
-        response=openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[{"role":"user","content":prompt}],
-            max_tokens=300
-        )
-
-        st.write(response.choices[0].message.content)
-
-    except Exception as e:
-
-        st.error(e)
 
