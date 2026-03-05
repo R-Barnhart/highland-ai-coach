@@ -1,3 +1,6 @@
+import os
+os.environ["MEDIAPIPE_DISABLE_GPU"] = "1"
+
 import streamlit as st
 import cv2
 import tempfile
@@ -46,12 +49,15 @@ OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
 # -----------------------------
 def get_ai_feedback(event, metrics):
 
+    if OPENAI_API_KEY == "":
+        return "OpenAI API key not configured."
+
     prompt = f"""
-You are a professional Highland Games coach analyzing a throw.
+You are a professional Highland Games throwing coach.
 
 Event: {event}
 
-Pose metrics detected from the athlete:
+Athlete metrics from pose analysis:
 {metrics}
 
 Provide coaching feedback including:
@@ -59,9 +65,7 @@ Provide coaching feedback including:
 1. What the athlete did well
 2. Technical issues
 3. How to fix them
-4. Specific drills to improve
-
-Write the response like a real throwing coach.
+4. Drills to improve
 """
 
     headers = {
@@ -76,16 +80,24 @@ Write the response like a real throwing coach.
         ]
     }
 
-    r = requests.post(
-        "https://api.openai.com/v1/chat/completions",
-        headers=headers,
-        data=json.dumps(payload)
-    )
+    try:
 
-    if r.status_code == 200:
-        return r.json()["choices"][0]["message"]["content"]
+        r = requests.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
 
-    return "AI feedback unavailable."
+        if r.status_code == 200:
+            return r.json()["choices"][0]["message"]["content"]
+
+        else:
+            return f"OpenAI error: {r.text}"
+
+    except Exception as e:
+        return f"AI request failed: {str(e)}"
+
 
 # -----------------------------
 # MEDIAPIPE SETUP
@@ -114,7 +126,9 @@ if uploaded_file is not None:
     video_path = tfile.name
 
     st.subheader("Original Video")
-    st.video(video_path)
+
+    original_bytes = open(video_path, "rb").read()
+    st.video(original_bytes)
 
     cap = cv2.VideoCapture(video_path)
 
@@ -196,10 +210,12 @@ if uploaded_file is not None:
     out.release()
 
 # -----------------------------
-# DISPLAY ANNOTATED VIDEO
+# DISPLAY SKELETON VIDEO
 # -----------------------------
     st.subheader("Skeleton Overlay Video")
-    st.video(output_file.name)
+
+    video_bytes = open(output_file.name, "rb").read()
+    st.video(video_bytes)
 
 # -----------------------------
 # METRICS
@@ -241,12 +257,10 @@ if uploaded_file is not None:
 # -----------------------------
         st.subheader("AI Coaching Feedback")
 
-        if OPENAI_API_KEY != "":
-            feedback = get_ai_feedback(event, metrics)
-            st.write(feedback)
-            coaching_output.write(feedback)
-        else:
-            st.warning("Add your OpenAI API key to Streamlit Secrets to enable AI coaching.")
+        feedback = get_ai_feedback(event, metrics)
+
+        st.write(feedback)
+        coaching_output.write(feedback)
 
     else:
         st.error("Pose not detected. Try a clearer video.")
