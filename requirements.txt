@@ -2,8 +2,9 @@ streamlit
 opencv-python-headless
 mediapipe
 numpy
+pandas
 openai
-pillow
+
 
 
 
