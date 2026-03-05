@@ -1,89 +1,136 @@
-# Highland Games AI Lab - Streamlit App (Fixed for MediaPipe Tasks API)
-
-# Highland Games AI Lab - Streamlit App (Fixed for MediaPipe Tasks API)
-# Highland Games AI Lab - Streamlit App (Fixed for MediaPipe Tasks API)
-
 import streamlit as st
 import cv2
+import tempfile
 import numpy as np
+import mediapipe as mp
+
 from mediapipe.tasks.python import vision
-from mediapipe.tasks.python.vision import PoseLandmarker, PoseLandmark
+from mediapipe.tasks.python.vision import PoseLandmarker
+from mediapipe.tasks.python.vision import PoseLandmarkerOptions
+from mediapipe.tasks.python.vision import PoseLandmark
 from mediapipe.tasks.python.core.base_options import BaseOptions
 
-# --- 1. FRONTEND CONFIGURATION ---
+# -----------------------------
+# 1. STREAMLIT PAGE CONFIG
+# -----------------------------
 st.set_page_config(page_title="Highland Games AI Lab", layout="wide")
-st.title("Highland Games AI Performance Lab")
-st.write("""
-Upload your throwing video and analyze the biomechanics using AI-powered pose estimation.
-""")
 
-# --- 2. UPLOAD VIDEO ---
-uploaded_file = st.file_uploader("Upload Your Throw", type=["mp4", "mov"])
+st.title("Highland Games AI Lab")
+st.write("Upload a throwing video and the AI will analyze hip drive and posture.")
 
-# --- 3. INITIALIZE MEDIAPIPE POSE LANDMARKER ---
-MODEL_PATH = "pose_landmarker_lite.task"  # Ensure this file exists in project folder
+# -----------------------------
+# 2. LOAD POSE MODEL
+# -----------------------------
+MODEL_PATH = "pose_landmarker_lite.task"
 
 base_options = BaseOptions(model_asset_path=MODEL_PATH)
-pose_options = PoseLandmarker.PoseLandmarkerOptions(
+
+options = PoseLandmarkerOptions(
     base_options=base_options,
     running_mode=vision.RunningMode.VIDEO
 )
 
-pose_landmarker = PoseLandmarker.create_from_options(pose_options)
+pose_landmarker = PoseLandmarker.create_from_options(options)
 
-# --- 4. PROCESS VIDEO ---
-if uploaded_file:
-    # Load video with OpenCV
-    cap = cv2.VideoCapture(uploaded_file.name)
+# -----------------------------
+# 3. VIDEO UPLOADER
+# -----------------------------
+uploaded_file = st.file_uploader("Upload Throw Video", type=["mp4","mov","avi"])
 
-    stframe = st.empty()  # Placeholder for video frames
-    peak_angle = 0  # Initialize peak hip angle
+if uploaded_file is not None:
+
+    st.success("Video uploaded!")
+
+    # Save uploaded video to temp file
+    tfile = tempfile.NamedTemporaryFile(delete=False)
+    tfile.write(uploaded_file.read())
+
+    video_path = tfile.name
+
+    # Display original video
+    st.subheader("Original Video")
+    st.video(video_path)
+
+    # -----------------------------
+    # 4. VIDEO PROCESSING
+    # -----------------------------
+    cap = cv2.VideoCapture(video_path)
+
+    frame_count = 0
+    hip_angles = []
+
+    st.subheader("Processing Frames...")
+
+    progress = st.progress(0)
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     while cap.isOpened():
+
         ret, frame = cap.read()
+
         if not ret:
             break
 
-        # Convert BGR to RGB
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frame_count += 1
 
-        # --- PoseLandmarker detection ---
-        result = pose_landmarker.detect_for_video(
-            frame_rgb,
-            timestamp_ms=int(cap.get(cv2.CAP_PROP_POS_MSEC))
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        mp_image = mp.Image(
+            image_format=mp.ImageFormat.SRGB,
+            data=rgb_frame
         )
 
-        # Draw landmarks
-        if result.pose_landmarks:
-            landmarks = result.pose_landmarks.landmark
-            for connection in PoseLandmark.POSE_CONNECTIONS:
-                start_idx, end_idx = connection
-                start = landmarks[start_idx]
-                end = landmarks[end_idx]
-                h, w, _ = frame.shape
-                start_coord = (int(start.x * w), int(start.y * h))
-                end_coord = (int(end.x * w), int(end.y * h))
-                cv2.line(frame, start_coord, end_coord, (0, 255, 0), 2)
+        timestamp = int(cap.get(cv2.CAP_PROP_POS_MSEC))
 
-            # Example: Calculate peak hip angle
+        results = pose_landmarker.detect_for_video(mp_image, timestamp)
+
+        if results.pose_landmarks:
+
+            landmarks = results.pose_landmarks[0]
+
+            left_shoulder = landmarks[PoseLandmark.LEFT_SHOULDER]
             left_hip = landmarks[PoseLandmark.LEFT_HIP]
             left_knee = landmarks[PoseLandmark.LEFT_KNEE]
-            left_shoulder = landmarks[PoseLandmark.LEFT_SHOULDER]
 
-            # Compute angle
-            v1 = np.array([left_shoulder.x - left_hip.x, left_shoulder.y - left_hip.y])
-            v2 = np.array([left_knee.x - left_hip.x, left_knee.y - left_hip.y])
-            cosine_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2) + 1e-6)
-            angle = np.arccos(np.clip(cosine_angle, -1.0, 1.0))
-            angle_deg = np.degrees(angle)
-            peak_angle = max(peak_angle, angle_deg)
+            # Convert to numpy points
+            shoulder = np.array([left_shoulder.x, left_shoulder.y])
+            hip = np.array([left_hip.x, left_hip.y])
+            knee = np.array([left_knee.x, left_knee.y])
 
-        # Display frame in Streamlit
-        stframe.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), channels="RGB")
+            # Calculate hip angle
+            a = shoulder - hip
+            b = knee - hip
+
+            cosine_angle = np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+            angle = np.degrees(np.arccos(cosine_angle))
+
+            hip_angles.append(angle)
+
+        progress.progress(frame_count / total_frames)
 
     cap.release()
 
-    # --- 5. DISPLAY RESULTS ---
-    st.subheader("Results")
-    st.metric("Peak Hip Angle", f"{int(peak_angle)}°")
+    # -----------------------------
+    # 5. RESULTS
+    # -----------------------------
+    st.subheader("Analysis Results")
+
+    if len(hip_angles) > 0:
+
+        peak_angle = max(hip_angles)
+
+        st.metric("Peak Hip Drive Angle", f"{peak_angle:.1f}°")
+
+        st.line_chart(hip_angles)
+
+        if peak_angle < 150:
+            st.warning("Limited hip extension. Drive harder through the hips.")
+        else:
+            st.success("Excellent hip extension!")
+
+    else:
+        st.error("No pose detected. Try a clearer video.")
+
+
 
