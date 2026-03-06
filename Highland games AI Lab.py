@@ -1,146 +1,207 @@
 import streamlit as st
 import cv2
 import numpy as np
-from PIL import Image
-from mediapipe.tasks.python import vision
-from mediapipe.tasks.python.vision import PoseLandmarker
-import openai
 import tempfile
-import time
+import mediapipe as mp
+import openai
 
-# -----------------------------
-# Streamlit page config
-# -----------------------------
+from mediapipe.tasks.python.vision import PoseLandmarker
+from mediapipe.tasks.python.vision import PoseLandmarkerOptions
+from mediapipe.tasks.python.vision import RunningMode
+from mediapipe.tasks.python.core.base_options import BaseOptions
+
+
+# -----------------------
+# PAGE SETUP
+# -----------------------
+
 st.set_page_config(page_title="Highland Games AI Lab", layout="wide")
+st.title("🏴 Highland Games AI Lab")
 
-# -----------------------------
-# Sidebar options
-# -----------------------------
-st.sidebar.title("Highland Games Settings")
-event_option = st.sidebar.selectbox(
+# -----------------------
+# SIDEBAR
+# -----------------------
+
+event = st.sidebar.selectbox(
     "Select Event",
     ["WOB", "WFD", "Hammer", "Stones", "Caber", "Sheaf"]
 )
 
-# AI feedback key
-openai_api_key = st.sidebar.text_input(
-    "OpenAI API Key", type="password"
-)
-openai.api_key = openai_api_key
+api_key = st.sidebar.text_input("OpenAI API Key", type="password")
+openai.api_key = api_key
 
-# -----------------------------
-# Video upload
-# -----------------------------
-uploaded_video = st.file_uploader(
-    "Upload Throw Video", type=["mp4", "mov", "avi"]
-)
+uploaded_file = st.file_uploader("Upload Throw Video", type=["mp4","mov","avi"])
 
-# -----------------------------
-# PoseLandmarker Setup (CPU safe)
-# -----------------------------
-MODEL_PATH = "pose_landmarker_lite.task"  # Must exist in project folder
 
-if not st.session_state.get("pose_model"):
-    # Load model once
-    def load_model():
-        if not MODEL_PATH:
-            st.error("Pose model file missing. Add pose_landmarker_lite.task")
-            st.stop()
-        return PoseLandmarker.create_from_model_path(MODEL_PATH)
-    st.session_state.pose_model = load_model()
+# -----------------------
+# LOAD POSE MODEL
+# -----------------------
 
-pose_model = st.session_state.pose_model
+MODEL_PATH = "pose_landmarker_lite.task"
 
-# -----------------------------
-# Skeleton overlay function
-# -----------------------------
+@st.cache_resource
+def load_pose_model():
+
+    options = PoseLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=MODEL_PATH),
+        running_mode=RunningMode.VIDEO
+    )
+
+    return PoseLandmarker.create_from_options(options)
+
+pose_model = load_pose_model()
+
+
+# -----------------------
+# SKELETON DRAW FUNCTION
+# -----------------------
+
 def draw_skeleton(frame, landmarks):
+
     h, w, _ = frame.shape
-    points = []
+    pts = []
+
     for lm in landmarks:
         x = int(lm.x * w)
         y = int(lm.y * h)
-        points.append((x, y))
+        pts.append((x,y))
 
-    # Manual PoseLandmarker connections
+    # simplified connection map
     connections = [
-        (0,1),(1,2),(2,3),(3,7),       # Right arm
-        (0,4),(4,5),(5,6),(6,8),       # Left arm
-        (9,10),                         # Hips
-        (11,12),(12,14),(14,16),        # Right leg
-        (11,13),(13,15),(15,17)         # Left leg
+        (11,13),(13,15),
+        (12,14),(14,16),
+        (11,12),
+        (23,24),
+        (11,23),(12,24),
+        (23,25),(25,27),
+        (24,26),(26,28)
     ]
 
-    for start, end in connections:
-        if start < len(points) and end < len(points):
-            cv2.line(frame, points[start], points[end], (0,255,0), 2)
+    for a,b in connections:
+        if a < len(pts) and b < len(pts):
+            cv2.line(frame, pts[a], pts[b], (0,255,0),2)
 
-    for point in points:
-        cv2.circle(frame, point, 4, (0,0,255), -1)
+    for p in pts:
+        cv2.circle(frame,p,4,(0,0,255),-1)
 
     return frame
 
-# -----------------------------
-# Video processing & skeleton overlay
-# -----------------------------
-if uploaded_video:
+
+# -----------------------
+# VIDEO PROCESSING
+# -----------------------
+
+if uploaded_file:
+
     tfile = tempfile.NamedTemporaryFile(delete=False)
-    tfile.write(uploaded_video.read())
+    tfile.write(uploaded_file.read())
 
     cap = cv2.VideoCapture(tfile.name)
-    stframe = st.empty()
-    prev_timestamp = -1  # for monotonic timestamp
 
-    peak_hip_angle = 0  # placeholder metric
+    stframe = st.empty()
+
+    frame_count = 0
+
+    hip_drive_vals=[]
+    rotation_vals=[]
+    balance_vals=[]
 
     while cap.isOpened():
+
         ret, frame = cap.read()
+
         if not ret:
             break
 
-        # Convert frame to RGB
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # Skip frames for speed
+        if frame_count % 3 != 0:
+            frame_count +=1
+            continue
 
-        # Pose detection with monotonic timestamp
-        timestamp_ms = int(cap.get(cv2.CAP_PROP_POS_MSEC))
-        if timestamp_ms <= prev_timestamp:
-            timestamp_ms = prev_timestamp + 1
-        prev_timestamp = timestamp_ms
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        # Create mediapipe Image from numpy array
-        mp_image = vision.Image(image_format=vision.ImageFormat.SRGB, data=frame_rgb)
+        timestamp = frame_count * 33
 
-        # Detect pose
-        result = pose_model.detect_for_video(mp_image, timestamp_ms)
+        mp_image = mp.Image(
+            image_format=mp.ImageFormat.SRGB,
+            data=rgb
+        )
 
-        # Draw skeleton if landmarks detected
+        result = pose_model.detect_for_video(
+            mp_image,
+            timestamp
+        )
+
         if result.pose_landmarks:
-            frame = draw_skeleton(frame, result.pose_landmarks)
 
-        # Display frame
-        stframe.image(frame, channels="BGR", use_column_width=True)
+            landmarks = result.pose_landmarks[0]
+
+            frame = draw_skeleton(frame, landmarks)
+
+            hip = landmarks[24]
+            shoulder = landmarks[12]
+            ankle = landmarks[28]
+
+            hip_drive = abs(hip.x - shoulder.x)
+            rotation = abs(shoulder.z)
+            balance = abs(hip.x - ankle.x)
+
+            hip_drive_vals.append(hip_drive)
+            rotation_vals.append(rotation)
+            balance_vals.append(balance)
+
+        stframe.image(frame, channels="BGR")
+
+        frame_count += 1
 
     cap.release()
 
-    # -----------------------------
-    # AI Feedback Panel
-    # -----------------------------
-    if openai_api_key:
-        st.subheader("AI Feedback on Throw")
-        try:
-            # Example: simple feedback request
-            feedback_prompt = f"Analyze this throw video for {event_option} and provide coaching advice."
-            response = openai.ChatCompletion.create(
-                model="gpt-4",
-                messages=[{"role":"user", "content": feedback_prompt}],
-                max_tokens=200
-            )
-            ai_feedback = response.choices[0].message.content
-            st.text(ai_feedback)
-        except Exception as e:
-            st.error(f"AI feedback unavailable: {e}")
-    else:
-        st.info("Enter your OpenAI API key to get AI feedback.")
+    # -----------------------
+    # METRICS
+    # -----------------------
+
+    if hip_drive_vals:
+
+        avg_hip = np.mean(hip_drive_vals)
+        avg_rot = np.mean(rotation_vals)
+        avg_bal = np.mean(balance_vals)
+
+        st.subheader("Biomechanics Metrics")
+
+        col1,col2,col3 = st.columns(3)
+
+        col1.metric("Hip Drive", round(avg_hip,3))
+        col2.metric("Rotation", round(avg_rot,3))
+        col3.metric("Balance", round(avg_bal,3))
+
+
+    # -----------------------
+    # AI COACH
+    # -----------------------
+
+    if api_key and st.button("Generate AI Coaching"):
+
+        prompt = f"""
+        Athlete performed a {event} throw.
+
+        Metrics:
+        Hip Drive: {avg_hip}
+        Rotation: {avg_rot}
+        Balance: {avg_bal}
+
+        Provide coaching feedback and drills.
+        """
+
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[{"role":"user","content":prompt}]
+        )
+
+        feedback = response["choices"][0]["message"]["content"]
+
+        st.subheader("AI Coach Feedback")
+        st.write(feedback)
+
 
 
 
