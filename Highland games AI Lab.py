@@ -6,11 +6,17 @@ import os
 import subprocess
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MEDIAPIPE — works on mediapipe==0.10.14 (pinned in requirements.txt)
+# MEDIAPIPE  (requires mediapipe==0.10.14 in requirements.txt)
+# model_complexity=1 uses the bundled lite model — no download needed.
+# model_complexity=2 tries to download heavy.tflite at runtime which
+# fails on Streamlit Cloud due to venv write permissions.
 # ─────────────────────────────────────────────────────────────────────────────
 import mediapipe as mp
 mp_pose    = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
+
+LANDMARK_SPEC   = mp_drawing.DrawingSpec(color=(0, 255, 120), thickness=4, circle_radius=6)
+CONNECTION_SPEC = mp_drawing.DrawingSpec(color=(0, 180, 255), thickness=4)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -25,48 +31,33 @@ uploaded_video = st.file_uploader(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DRAWING SPECS  — thick, bright, easy to see
-# ─────────────────────────────────────────────────────────────────────────────
-LANDMARK_SPEC   = mp_drawing.DrawingSpec(color=(0, 255, 120),  thickness=4, circle_radius=6)
-CONNECTION_SPEC = mp_drawing.DrawingSpec(color=(0, 180, 255),  thickness=4)
-
-# ─────────────────────────────────────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
 def calculate_angle(a, b, c):
     """Interior angle at joint b using dot product (degrees)."""
     a, b, c = np.array(a, dtype=float), np.array(b, dtype=float), np.array(c, dtype=float)
-    ba = a - b
-    bc = c - b
+    ba, bc = a - b, c - b
     norm = np.linalg.norm(ba) * np.linalg.norm(bc)
     if norm < 1e-8:
         return 0.0
-    cos_a = np.clip(np.dot(ba, bc) / norm, -1.0, 1.0)
-    return float(np.degrees(np.arccos(cos_a)))
+    return float(np.degrees(np.arccos(np.clip(np.dot(ba, bc) / norm, -1.0, 1.0))))
 
 
 def reencode_h264(src: str, dst: str) -> tuple:
-    """Re-encode to H.264 mp4 at high quality (CRF 18) for browser playback."""
+    """Re-encode to H.264 mp4 (CRF 18) so every browser can play it."""
     for candidate in ["ffmpeg", "/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg"]:
-        if subprocess.run(["which", "ffmpeg"], capture_output=True).returncode == 0 \
-                or os.path.exists(candidate):
+        if os.path.exists(candidate) or \
+                subprocess.run(["which", "ffmpeg"], capture_output=True).returncode == 0:
             ffmpeg = candidate
             break
     else:
-        return False, "ffmpeg not found — add 'ffmpeg' to packages.txt"
+        return False, "ffmpeg not found — add 'ffmpeg' to packages.txt in your repo root."
 
     r = subprocess.run(
-        [
-            ffmpeg, "-y", "-i", src,
-            "-vcodec",   "libx264",
-            "-preset",   "fast",
-            "-crf",      "18",          # 18 = high quality (lower = better)
-            "-pix_fmt",  "yuv420p",     # required for Chrome / Safari
-            "-movflags", "+faststart",  # stream-ready
-            "-an",
-            dst,
-        ],
+        [ffmpeg, "-y", "-i", src,
+         "-vcodec", "libx264", "-preset", "fast", "-crf", "18",
+         "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an", dst],
         capture_output=True, text=True, timeout=600,
     )
     if r.returncode != 0 or not os.path.exists(dst) or os.path.getsize(dst) < 500:
@@ -103,21 +94,19 @@ def coaching_feedback(elbow_angle, torque):
 def process_video(input_path: str, raw_out: str):
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
-        return None, None, None, None, "cv2 could not open the file."
+        return None, None, None, None, 0, "cv2 could not open the file."
 
-    fps    = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    total  = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    # ── Keep native resolution — DO NOT force resize (causes grain) ──────────
+    fps      = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total    = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     native_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     native_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    # Cap very large videos to 1280 wide to keep processing reasonable
+    # Keep native resolution; cap width at 1280 only for very large files
     if native_w > 1280:
-        scale   = 1280 / native_w
-        out_w   = 1280
-        out_h   = int(native_h * scale)
-        # make dims even (required by some codecs)
-        out_h  += out_h % 2
+        scale  = 1280 / native_w
+        out_w  = 1280
+        out_h  = int(native_h * scale)
+        out_h += out_h % 2   # keep even
     else:
         out_w, out_h = native_w, native_h
 
@@ -125,18 +114,19 @@ def process_video(input_path: str, raw_out: str):
     writer = cv2.VideoWriter(raw_out, fourcc, fps, (out_w, out_h))
 
     elbow_history, torque_history = [], []
-    release_frame = None
-    frame_index   = 0
+    release_frame      = None
+    frame_index        = 0
     landmarks_detected = 0
 
     bar = st.progress(0, text="Analysing video…")
 
+    # ── model_complexity=1  ← CRITICAL: bundled lite model, no download needed
     with mp_pose.Pose(
         static_image_mode=False,
-        model_complexity=2,           # use heavy model for better accuracy
+        model_complexity=1,
         smooth_landmarks=True,
         enable_segmentation=False,
-        min_detection_confidence=0.3, # lower threshold = detects more frames
+        min_detection_confidence=0.3,
         min_tracking_confidence=0.3,
     ) as pose:
 
@@ -145,18 +135,16 @@ def process_video(input_path: str, raw_out: str):
             if not ret:
                 break
 
-            # Resize only if needed
             if native_w != out_w:
                 frame = cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_AREA)
 
-            # MediaPipe needs RGB
-            rgb     = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = pose.process(rgb)
-
-            # ── Draw wireframe ───────────────────────────────────────────────
+            rgb       = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results   = pose.process(rgb)
             annotated = frame.copy()
+
             if results.pose_landmarks:
                 landmarks_detected += 1
+
                 mp_drawing.draw_landmarks(
                     annotated,
                     results.pose_landmarks,
@@ -167,16 +155,15 @@ def process_video(input_path: str, raw_out: str):
 
                 lm = results.pose_landmarks.landmark
                 def pt(i):
-                    return [lm[i].x * out_w, lm[i].y * out_h]  # pixel coords
+                    return [lm[i].x * out_w, lm[i].y * out_h]
 
-                # ── Check BOTH arms, pick the one more extended ──────────────
-                r_elbow = calculate_angle(pt(12), pt(14), pt(16))  # right arm
-                l_elbow = calculate_angle(pt(11), pt(13), pt(15))  # left arm
+                # Check both arms — use whichever is more extended
+                r_elbow = calculate_angle(pt(12), pt(14), pt(16))
+                l_elbow = calculate_angle(pt(11), pt(13), pt(15))
                 elbow_angle   = max(r_elbow, l_elbow)
-                throwing_side = "R" if r_elbow >= l_elbow else "L"
+                side          = "R" if r_elbow >= l_elbow else "L"
 
-                # Hip torque — shoulder/hip/knee on throwing side
-                if throwing_side == "R":
+                if side == "R":
                     hip_angle = calculate_angle(pt(12), pt(24), pt(26))
                 else:
                     hip_angle = calculate_angle(pt(11), pt(23), pt(25))
@@ -188,23 +175,23 @@ def process_video(input_path: str, raw_out: str):
                 if elbow_angle > 120 and release_frame is None:
                     release_frame = frame_index
 
-                # ── HUD overlay ──────────────────────────────────────────────
-                font      = cv2.FONT_HERSHEY_SIMPLEX
-                font_sc   = max(0.6, out_w / 1280)  # scale text to frame size
-                thickness = max(2, int(font_sc * 2))
-                pad       = int(20 * font_sc)
+                # HUD — semi-transparent background strip
+                font   = cv2.FONT_HERSHEY_SIMPLEX
+                fsc    = max(0.6, out_w / 1600)
+                thick  = max(2, int(fsc * 2.5))
+                pad    = int(20 * fsc)
+                strip_h = int(150 * fsc)
 
-                # Semi-transparent dark background strip
                 overlay = annotated.copy()
-                cv2.rectangle(overlay, (0, 0), (int(out_w * 0.42), int(145 * font_sc)), (0, 0, 0), -1)
-                cv2.addWeighted(overlay, 0.5, annotated, 0.5, 0, annotated)
+                cv2.rectangle(overlay, (0, 0), (int(out_w * 0.45), strip_h), (0, 0, 0), -1)
+                cv2.addWeighted(overlay, 0.45, annotated, 0.55, 0, annotated)
 
-                cv2.putText(annotated, f"Elbow ({throwing_side}): {int(elbow_angle)}°",
-                            (pad, int(45 * font_sc)),  font, font_sc, (0, 255, 120),  thickness)
-                cv2.putText(annotated, f"Hip Torque: {int(torque)}°",
-                            (pad, int(85 * font_sc)),  font, font_sc, (0, 200, 255),  thickness)
+                cv2.putText(annotated, f"Elbow ({side}): {int(elbow_angle)}",
+                            (pad, int(45 * fsc)),  font, fsc,        (0, 255, 120),  thick)
+                cv2.putText(annotated, f"Hip Torque: {int(torque)}",
+                            (pad, int(88 * fsc)),  font, fsc,        (0, 200, 255),  thick)
                 cv2.putText(annotated, f"Frame {frame_index}/{total}",
-                            (pad, int(122 * font_sc)), font, font_sc * 0.75, (180, 180, 180), max(1, thickness - 1))
+                            (pad, int(126 * fsc)), font, fsc * 0.75, (180, 180, 180), max(1, thick - 1))
 
             writer.write(annotated)
             frame_index += 1
@@ -217,7 +204,7 @@ def process_video(input_path: str, raw_out: str):
     writer.release()
     bar.empty()
 
-    return elbow_history, torque_history, release_frame, frame_index, landmarks_detected
+    return elbow_history, torque_history, release_frame, frame_index, landmarks_detected, None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -236,48 +223,43 @@ if uploaded_video is not None:
     raw_path = input_path.replace(suffix, "_raw.mp4")
     web_path = input_path.replace(suffix, "_web.mp4")
 
-    # ── Step 1: pose detection & wireframe ───────────────────────────────────
-    elbow_history, torque_history, release_frame, total_frames, lm_count = \
+    # ── Pose detection ────────────────────────────────────────────────────────
+    elbow_history, torque_history, release_frame, total_frames, lm_count, err = \
         process_video(input_path, raw_path)
 
     if elbow_history is None:
-        st.error("Could not open video file. Please try a different file.")
+        st.error(f"Could not open video: {err}")
         st.stop()
 
-    # Show detection rate so user knows if pose tracking worked
     detect_pct = int(lm_count / max(total_frames, 1) * 100)
     if detect_pct >= 60:
         st.success(f"✅  Analysis complete — {total_frames} frames, pose detected in {detect_pct}% of frames.")
     elif detect_pct > 0:
-        st.warning(f"⚠️  Pose only detected in {detect_pct}% of frames. "
-                   "Try better lighting or ensure the full body is visible.")
+        st.warning(f"⚠️  Pose detected in only {detect_pct}% of frames. "
+                   "Try better lighting or ensure the full body is in frame.")
     else:
-        st.error("❌  No pose landmarks detected at all. "
-                 "Ensure the athlete is clearly visible, well-lit, and the full body is in frame.")
+        st.error("❌  No pose landmarks detected. Ensure the athlete is clearly visible, "
+                 "well-lit, and the full body is in frame.")
 
-    # ── Step 2: re-encode to H.264 at high quality ───────────────────────────
+    # ── Re-encode for browser playback ───────────────────────────────────────
     with st.spinner("Encoding video for playback…"):
-        ok, err = reencode_h264(raw_path, web_path)
+        ok, enc_err = reencode_h264(raw_path, web_path)
 
-    if ok:
-        play_path = web_path
-    else:
-        play_path = raw_path
-        st.warning(f"Re-encode failed (`{err}`). "
-                   "Make sure `packages.txt` in your repo root contains `ffmpeg` on its own line.")
+    play_path = web_path if ok else raw_path
+    if not ok:
+        st.warning(f"Re-encode failed: `{enc_err}`  — make sure `packages.txt` contains `ffmpeg`.")
 
     with open(play_path, "rb") as f:
         st.video(f.read())
 
-    # ── Step 3: metrics ───────────────────────────────────────────────────────
+    # ── Release frame ─────────────────────────────────────────────────────────
     if release_frame is not None:
         st.info(f"🎯  Estimated Release Frame: **{release_frame}**")
-    else:
-        if lm_count > 0:
-            st.warning("Release frame not detected — elbow angle stayed below 120°. "
-                       "Try filming from the side so the arm extension is clearly visible.")
-        # else already shown error above
+    elif lm_count > 0:
+        st.warning("Release frame not detected — elbow stayed below 120°. "
+                   "Film from the side so arm extension is clearly visible.")
 
+    # ── Metrics & feedback ────────────────────────────────────────────────────
     if elbow_history:
         avg_elbow  = float(np.mean(elbow_history))
         avg_torque = float(np.mean(torque_history))
@@ -309,5 +291,4 @@ if uploaded_video is not None:
             os.unlink(p)
         except Exception:
             pass
-
 
