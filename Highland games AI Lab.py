@@ -4,59 +4,79 @@ import numpy as np
 import tempfile
 import os
 import subprocess
+import base64
+import io
+from PIL import Image
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MEDIAPIPE  (requires mediapipe==0.10.14 in requirements.txt)
-# model_complexity=1 uses the bundled lite model — no download needed.
-# model_complexity=2 tries to download heavy.tflite at runtime which
-# fails on Streamlit Cloud due to venv write permissions.
+# model_complexity=1 uses the bundled lite model — no download needed
 # ─────────────────────────────────────────────────────────────────────────────
 import mediapipe as mp
 mp_pose    = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
 
-LANDMARK_SPEC   = mp_drawing.DrawingSpec(color=(0, 255, 120), thickness=4, circle_radius=6)
-CONNECTION_SPEC = mp_drawing.DrawingSpec(color=(0, 180, 255), thickness=4)
+LANDMARK_SPEC   = mp_drawing.DrawingSpec(color=(0, 255, 120), thickness=3, circle_radius=5)
+CONNECTION_SPEC = mp_drawing.DrawingSpec(color=(0, 180, 255), thickness=3)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Highland Games AI Coach", layout="wide")
-st.title("🏴 Highland Games AI Throw Coach")
-st.write("Upload a throwing video for biomechanical analysis.")
+st.set_page_config(page_title="Highland Games AI Coach", layout="centered")
 
-uploaded_video = st.file_uploader(
-    "Upload Throw Video",
-    type=["mp4", "mov", "avi", "mpeg4"]
-)
+st.title("🏴 Highland Games AI Throw Coach")
+st.write("Upload a throwing video to get a wireframe overlay and GPT-4o coaching feedback.")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SIDEBAR — API key + event selector
+# ─────────────────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.header("⚙️ Settings")
+    openai_key = st.text_input("OpenAI API Key", type="password",
+                               placeholder="sk-...",
+                               help="Get yours at platform.openai.com/api-keys")
+    if openai_key:
+        st.success("API key saved ✓", icon="🔐")
+
+    st.divider()
+    event = st.selectbox("Highland Games Event", [
+        "Auto-detect",
+        "Caber Toss",
+        "Scottish Hammer Throw",
+        "Weight for Distance (light)",
+        "Weight for Distance (heavy)",
+        "Stone Put (Braemar)",
+        "Stone Put (Open)",
+        "Weight Over Bar",
+        "Sheaf Toss",
+    ])
+
+    st.divider()
+    num_frames = st.slider("Key frames sent to GPT", 4, 10, 6,
+                           help="More frames = richer analysis, slightly higher cost.")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FILE UPLOAD
+# ─────────────────────────────────────────────────────────────────────────────
+uploaded_video = st.file_uploader("Upload Throw Video", type=["mp4", "mov", "avi", "mpeg4"])
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPERS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def calculate_angle(a, b, c):
-    """Interior angle at joint b using dot product (degrees)."""
-    a, b, c = np.array(a, dtype=float), np.array(b, dtype=float), np.array(c, dtype=float)
-    ba, bc = a - b, c - b
-    norm = np.linalg.norm(ba) * np.linalg.norm(bc)
-    if norm < 1e-8:
-        return 0.0
-    return float(np.degrees(np.arccos(np.clip(np.dot(ba, bc) / norm, -1.0, 1.0))))
-
-
 def reencode_h264(src: str, dst: str) -> tuple:
-    """Re-encode to H.264 mp4 (CRF 18) so every browser can play it."""
+    """Re-encode src to H.264 mp4 so every browser can play it."""
     for candidate in ["ffmpeg", "/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg"]:
         if os.path.exists(candidate) or \
                 subprocess.run(["which", "ffmpeg"], capture_output=True).returncode == 0:
             ffmpeg = candidate
             break
     else:
-        return False, "ffmpeg not found — add 'ffmpeg' to packages.txt in your repo root."
+        return False, "ffmpeg not found — add 'ffmpeg' to packages.txt"
 
     r = subprocess.run(
         [ffmpeg, "-y", "-i", src,
-         "-vcodec", "libx264", "-preset", "fast", "-crf", "18",
+         "-vcodec", "libx264", "-preset", "fast", "-crf", "20",
          "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-an", dst],
         capture_output=True, text=True, timeout=600,
     )
@@ -65,62 +85,102 @@ def reencode_h264(src: str, dst: str) -> tuple:
     return True, ""
 
 
-def coaching_feedback(elbow_angle, torque):
-    tips = []
-    if elbow_angle < 130:
-        tips.append("⚠️  Arm significantly bent — extend the throwing arm fully for more distance.")
-    elif elbow_angle < 155:
-        tips.append("⚠️  Extend your throwing arm more at release for maximum distance.")
-    elif elbow_angle > 165:
-        tips.append("✅  Good arm extension at release.")
-    else:
-        tips.append("👍  Acceptable arm extension — aim for full extension (>165°).")
+def pick_frame_indices(total: int, n: int) -> list:
+    """Evenly spread n indices across the middle 90% of the video."""
+    start = max(0, int(total * 0.05))
+    end   = min(total - 1, int(total * 0.95))
+    if start >= end:
+        return list(range(min(n, total)))
+    step = max(1, (end - start) // (n - 1))
+    return [start + i * step for i in range(n)][:n]
 
-    if torque < 15:
-        tips.append("⚠️  Very little hip-shoulder separation. Drive hips first, shoulders follow.")
-    elif torque < 25:
-        tips.append("⚠️  Increase hip-shoulder separation. Load the hips more in the wind-up.")
-    elif torque > 35:
-        tips.append("✅  Excellent hip drive and torso rotation — great power generation.")
-    else:
-        tips.append("👍  Decent hip torque. Work on more aggressive hip initiation.")
-    return tips
+
+def frame_to_b64(frame_rgb: np.ndarray) -> str:
+    img = Image.fromarray(frame_rgb)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=88)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def gpt_coaching(api_key: str, frames_rgb: list, event_name: str) -> str:
+    """Send annotated key frames to GPT-4o and return coaching text."""
+    from openai import OpenAI
+    client = OpenAI(api_key=api_key)
+
+    system = """You are an elite Highland Games coach and sports biomechanics expert
+with 20+ years experience coaching caber toss, hammer throw, weight-for-distance,
+stone put, sheaf toss, and weight-over-bar events.
+
+You will receive sequential key frames from a throw video. Each frame has a
+MediaPipe pose wireframe overlaid (green dots = joints, blue lines = skeleton).
+
+Structure your response with these sections:
+**Event Identified** — name the event based on visual cues.
+**Phase Breakdown** — setup/wind-up → power phase → release → follow-through.
+**Biomechanics** — hip-shoulder separation, foot placement, arm path, spine angle, head position.
+**Strengths** — what the athlete is doing well (be specific, reference the skeleton).
+**Top 3 Improvements** — the highest-impact coaching cues for more distance.
+**Recommended Drills** — 2-3 targeted drills to fix the weaknesses identified.
+
+Be direct, technically precise, and encouraging."""
+
+    content = [{
+        "type": "text",
+        "text": (f"Analyse this **{event_name}** throw. "
+                 f"Here are {len(frames_rgb)} sequential key frames with pose wireframe overlays.")
+    }]
+    for i, frame in enumerate(frames_rgb):
+        content.append({"type": "text", "text": f"Frame {i+1} of {len(frames_rgb)}:"})
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{frame_to_b64(frame)}", "detail": "high"}
+        })
+
+    resp = client.chat.completions.create(
+        model="gpt-4o",
+        max_tokens=2000,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user",   "content": content},
+        ],
+    )
+    return resp.choices[0].message.content
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # VIDEO PROCESSING
 # ─────────────────────────────────────────────────────────────────────────────
+DISPLAY_W = 720   # standard display width for the output video
+DISPLAY_H = 404   # 16:9
 
-def process_video(input_path: str, raw_out: str):
+def process_video(input_path: str, raw_out: str, key_indices: set):
+    """
+    Draw pose wireframe on every frame, write to raw_out.
+    Collect key frames (RGB) at key_indices for GPT.
+    Returns (key_frames, total_frames, landmarks_detected).
+    """
     cap = cv2.VideoCapture(input_path)
     if not cap.isOpened():
-        return None, None, None, None, 0, "cv2 could not open the file."
+        return None, 0, 0
 
     fps      = cap.get(cv2.CAP_PROP_FPS) or 30.0
     total    = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     native_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     native_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
-    # Keep native resolution; cap width at 1280 only for very large files
-    if native_w > 1280:
-        scale  = 1280 / native_w
-        out_w  = 1280
-        out_h  = int(native_h * scale)
-        out_h += out_h % 2   # keep even
-    else:
-        out_w, out_h = native_w, native_h
+    # Scale to standard display size, keep aspect ratio
+    scale  = min(DISPLAY_W / native_w, DISPLAY_H / native_h)
+    out_w  = int(native_w * scale) // 2 * 2   # keep even
+    out_h  = int(native_h * scale) // 2 * 2
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(raw_out, fourcc, fps, (out_w, out_h))
 
-    elbow_history, torque_history = [], []
-    release_frame      = None
+    key_frames         = []
     frame_index        = 0
     landmarks_detected = 0
+    bar = st.progress(0, text="Processing pose wireframe…")
 
-    bar = st.progress(0, text="Analysing video…")
-
-    # ── model_complexity=1  ← CRITICAL: bundled lite model, no download needed
     with mp_pose.Pose(
         static_image_mode=False,
         model_complexity=1,
@@ -135,16 +195,13 @@ def process_video(input_path: str, raw_out: str):
             if not ret:
                 break
 
-            if native_w != out_w:
-                frame = cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_AREA)
-
+            frame     = cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_AREA)
             rgb       = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results   = pose.process(rgb)
             annotated = frame.copy()
 
             if results.pose_landmarks:
                 landmarks_detected += 1
-
                 mp_drawing.draw_landmarks(
                     annotated,
                     results.pose_landmarks,
@@ -153,49 +210,18 @@ def process_video(input_path: str, raw_out: str):
                     connection_drawing_spec=CONNECTION_SPEC,
                 )
 
-                lm = results.pose_landmarks.landmark
-                def pt(i):
-                    return [lm[i].x * out_w, lm[i].y * out_h]
-
-                # Check both arms — use whichever is more extended
-                r_elbow = calculate_angle(pt(12), pt(14), pt(16))
-                l_elbow = calculate_angle(pt(11), pt(13), pt(15))
-                elbow_angle   = max(r_elbow, l_elbow)
-                side          = "R" if r_elbow >= l_elbow else "L"
-
-                if side == "R":
-                    hip_angle = calculate_angle(pt(12), pt(24), pt(26))
-                else:
-                    hip_angle = calculate_angle(pt(11), pt(23), pt(25))
-                torque = abs(elbow_angle - hip_angle)
-
-                elbow_history.append(elbow_angle)
-                torque_history.append(torque)
-
-                if elbow_angle > 120 and release_frame is None:
-                    release_frame = frame_index
-
-                # HUD — semi-transparent background strip
-                font   = cv2.FONT_HERSHEY_SIMPLEX
-                fsc    = max(0.6, out_w / 1600)
-                thick  = max(2, int(fsc * 2.5))
-                pad    = int(20 * fsc)
-                strip_h = int(150 * fsc)
-
-                overlay = annotated.copy()
-                cv2.rectangle(overlay, (0, 0), (int(out_w * 0.45), strip_h), (0, 0, 0), -1)
-                cv2.addWeighted(overlay, 0.45, annotated, 0.55, 0, annotated)
-
-                cv2.putText(annotated, f"Elbow ({side}): {int(elbow_angle)}",
-                            (pad, int(45 * fsc)),  font, fsc,        (0, 255, 120),  thick)
-                cv2.putText(annotated, f"Hip Torque: {int(torque)}",
-                            (pad, int(88 * fsc)),  font, fsc,        (0, 200, 255),  thick)
-                cv2.putText(annotated, f"Frame {frame_index}/{total}",
-                            (pad, int(126 * fsc)), font, fsc * 0.75, (180, 180, 180), max(1, thick - 1))
+            # Subtle frame counter in corner
+            cv2.putText(annotated, f"{frame_index}/{total}",
+                        (8, out_h - 10), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.45, (160, 160, 160), 1)
 
             writer.write(annotated)
-            frame_index += 1
 
+            # Collect key frame for GPT (RGB, annotated)
+            if frame_index in key_indices:
+                key_frames.append(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB))
+
+            frame_index += 1
             if total > 0:
                 bar.progress(min(frame_index / total, 1.0),
                              text=f"Frame {frame_index} / {total}")
@@ -204,7 +230,7 @@ def process_video(input_path: str, raw_out: str):
     writer.release()
     bar.empty()
 
-    return elbow_history, torque_history, release_frame, frame_index, landmarks_detected, None
+    return key_frames, frame_index, landmarks_detected
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -213,7 +239,8 @@ def process_video(input_path: str, raw_out: str):
 
 if uploaded_video is not None:
 
-    st.subheader("Video Analysis")
+    if not openai_key:
+        st.warning("⚠️  Enter your OpenAI API key in the sidebar to enable GPT-4o coaching.")
 
     suffix = os.path.splitext(uploaded_video.name)[1] or ".mp4"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -223,72 +250,77 @@ if uploaded_video is not None:
     raw_path = input_path.replace(suffix, "_raw.mp4")
     web_path = input_path.replace(suffix, "_web.mp4")
 
-    # ── Pose detection ────────────────────────────────────────────────────────
-    elbow_history, torque_history, release_frame, total_frames, lm_count, err = \
-        process_video(input_path, raw_path)
+    # Quick peek at total frames to choose key indices
+    _cap   = cv2.VideoCapture(input_path)
+    _total = int(_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    _cap.release()
+    key_idx_list = pick_frame_indices(_total, num_frames)
+    key_idx_set  = set(key_idx_list)
 
-    if elbow_history is None:
-        st.error(f"Could not open video: {err}")
+    # ── Step 1: pose wireframe ────────────────────────────────────────────────
+    key_frames, total_frames, lm_count = process_video(input_path, raw_path, key_idx_set)
+
+    if key_frames is None:
+        st.error("Could not open video file. Please try a different file.")
         st.stop()
 
     detect_pct = int(lm_count / max(total_frames, 1) * 100)
     if detect_pct >= 60:
-        st.success(f"✅  Analysis complete — {total_frames} frames, pose detected in {detect_pct}% of frames.")
+        st.success(f"✅  Pose detected in {detect_pct}% of {total_frames} frames.")
     elif detect_pct > 0:
-        st.warning(f"⚠️  Pose detected in only {detect_pct}% of frames. "
-                   "Try better lighting or ensure the full body is in frame.")
+        st.warning(f"⚠️  Pose only detected in {detect_pct}% of frames. "
+                   "Try better lighting or ensure the full body is visible.")
     else:
-        st.error("❌  No pose landmarks detected. Ensure the athlete is clearly visible, "
-                 "well-lit, and the full body is in frame.")
+        st.error("❌  No pose landmarks detected. Ensure the athlete is clearly visible "
+                 "and the full body is in frame.")
 
-    # ── Re-encode for browser playback ───────────────────────────────────────
-    with st.spinner("Encoding video for playback…"):
+    # ── Step 2: re-encode for browser ────────────────────────────────────────
+    with st.spinner("Preparing video…"):
         ok, enc_err = reencode_h264(raw_path, web_path)
 
     play_path = web_path if ok else raw_path
     if not ok:
-        st.warning(f"Re-encode failed: `{enc_err}`  — make sure `packages.txt` contains `ffmpeg`.")
+        st.warning(f"Re-encode failed: `{enc_err}` — add `ffmpeg` to packages.txt")
 
+    st.subheader("🎬 Wireframe Overlay")
     with open(play_path, "rb") as f:
         st.video(f.read())
 
-    # ── Release frame ─────────────────────────────────────────────────────────
-    if release_frame is not None:
-        st.info(f"🎯  Estimated Release Frame: **{release_frame}**")
-    elif lm_count > 0:
-        st.warning("Release frame not detected — elbow stayed below 120°. "
-                   "Film from the side so arm extension is clearly visible.")
+    # ── Step 3: key frame strip ───────────────────────────────────────────────
+    if key_frames:
+        st.subheader("🖼️ Key Frames Sent to GPT-4o")
+        cols = st.columns(len(key_frames))
+        for col, (frame, idx) in zip(cols, zip(key_frames, key_idx_list)):
+            with col:
+                st.image(frame, caption=f"Frame {idx}", use_container_width=True)
 
-    # ── Metrics & feedback ────────────────────────────────────────────────────
-    if elbow_history:
-        avg_elbow  = float(np.mean(elbow_history))
-        avg_torque = float(np.mean(torque_history))
-        max_elbow  = float(np.max(elbow_history))
-        max_torque = float(np.max(torque_history))
+    # ── Step 4: GPT-4o coaching ───────────────────────────────────────────────
+    if openai_key and key_frames:
+        st.subheader("🏆 GPT-4o Coaching Feedback")
+        event_label = event if event != "Auto-detect" else "Highland Games throw"
 
-        st.subheader("📊 Throw Metrics")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Avg Arm Extension", f"{int(avg_elbow)}°")
-        c2.metric("Max Arm Extension", f"{int(max_elbow)}°")
-        c3.metric("Avg Hip Torque",    f"{int(avg_torque)}°")
-        c4.metric("Max Hip Torque",    f"{int(max_torque)}°")
+        with st.spinner("GPT-4o is analysing your throw…"):
+            try:
+                feedback = gpt_coaching(openai_key, key_frames, event_label)
+                st.markdown(feedback)
 
-        st.subheader("📈 Angle History")
-        ch1, ch2 = st.columns(2)
-        with ch1:
-            st.caption("Elbow Angle per Frame")
-            st.line_chart(elbow_history)
-        with ch2:
-            st.caption("Hip Torque per Frame")
-            st.line_chart(torque_history)
+                st.download_button(
+                    "📥 Download Coaching Report",
+                    data=feedback,
+                    file_name="coaching_report.txt",
+                    mime="text/plain",
+                )
+            except Exception as e:
+                st.error(f"GPT-4o error: {e}")
 
-        st.subheader("🏆 Coaching Feedback")
-        for tip in coaching_feedback(avg_elbow, avg_torque):
-            st.write(tip)
+    elif not openai_key:
+        st.info("Add your OpenAI API key in the sidebar to get GPT-4o coaching feedback.")
 
+    # ── Cleanup ───────────────────────────────────────────────────────────────
     for p in [input_path, raw_path, web_path]:
         try:
             os.unlink(p)
         except Exception:
             pass
+
 
