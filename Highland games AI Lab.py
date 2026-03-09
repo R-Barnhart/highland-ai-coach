@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 import mediapipe as mp
 import tempfile
-import math
+import os
 
 # -----------------------------
 # STREAMLIT PAGE
@@ -15,7 +15,6 @@ st.set_page_config(
 )
 
 st.title("🏴 Highland Games AI Throw Coach")
-
 st.write("Upload a throwing video for biomechanical analysis.")
 
 uploaded_video = st.file_uploader(
@@ -27,38 +26,24 @@ uploaded_video = st.file_uploader(
 # MEDIAPIPE SETUP
 # -----------------------------
 
-mp_pose = mp.solutions.pose
+mp_pose    = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
-
-pose = mp_pose.Pose(
-    static_image_mode=False,
-    model_complexity=1,
-    enable_segmentation=False,
-    min_detection_confidence=0.5,
-    min_tracking_confidence=0.5
-)
 
 # -----------------------------
 # ANGLE CALCULATION
 # -----------------------------
 
 def calculate_angle(a, b, c):
-
     a = np.array(a)
     b = np.array(b)
     c = np.array(c)
 
-    radians = np.arctan2(
-        c[1] - b[1], c[0] - b[0]
-    ) - np.arctan2(
-        a[1] - b[1], a[0] - b[0]
-    )
+    radians = np.arctan2(c[1] - b[1], c[0] - b[0]) \
+            - np.arctan2(a[1] - b[1], a[0] - b[0])
 
     angle = np.abs(radians * 180.0 / np.pi)
-
     if angle > 180:
         angle = 360 - angle
-
     return angle
 
 # -----------------------------
@@ -66,20 +51,21 @@ def calculate_angle(a, b, c):
 # -----------------------------
 
 def coaching_feedback(elbow_angle, torque):
-
     tips = []
 
     if elbow_angle < 150:
-        tips.append("Extend your throwing arm more at release.")
-
-    if elbow_angle > 170:
-        tips.append("Good arm extension during release.")
+        tips.append("Extend your throwing arm more at release for maximum distance.")
+    elif elbow_angle > 165:
+        tips.append("Good arm extension at release.")
+    else:
+        tips.append("Arm extension is acceptable — work toward full extension (>165 degrees).")
 
     if torque < 20:
-        tips.append("Increase hip-shoulder separation for more power.")
-
-    if torque > 30:
-        tips.append("Excellent hip drive and torso rotation.")
+        tips.append("Increase hip-shoulder separation. Drive your hips before your shoulders rotate.")
+    elif torque > 30:
+        tips.append("Excellent hip drive and torso rotation — good power generation.")
+    else:
+        tips.append("Decent hip torque. Focus on loading the hips more in the wind-up phase.")
 
     return tips
 
@@ -87,154 +73,184 @@ def coaching_feedback(elbow_angle, torque):
 # VIDEO PROCESSING
 # -----------------------------
 
-if uploaded_video:
+def process_video(input_path, output_path):
+    """
+    Run MediaPipe Pose on every frame, draw skeleton wireframe,
+    write annotated video to output_path, and collect metrics.
+    Returns (elbow_history, torque_history, release_frame, total_frames).
+    """
+
+    cap = cv2.VideoCapture(input_path)
+
+    if not cap.isOpened():
+        return None, None, None, None
+
+    fps    = cap.get(cv2.CAP_PROP_FPS) or 30
+    out_w, out_h = 960, 540
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(output_path, fourcc, fps, (out_w, out_h))
+
+    elbow_history  = []
+    torque_history = []
+    release_frame  = None
+    frame_index    = 0
+
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    bar   = st.progress(0, text="Processing video...")
+
+    with mp_pose.Pose(
+        static_image_mode=False,
+        model_complexity=1,
+        enable_segmentation=False,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5,
+    ) as pose:
+
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            frame     = cv2.resize(frame, (out_w, out_h))
+            rgb       = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results   = pose.process(rgb)
+            annotated = frame.copy()
+
+            if results.pose_landmarks:
+
+                mp_drawing.draw_landmarks(
+                    annotated,
+                    results.pose_landmarks,
+                    mp_pose.POSE_CONNECTIONS,
+                    mp_drawing.DrawingSpec(color=(0, 255, 180), thickness=2, circle_radius=3),
+                    mp_drawing.DrawingSpec(color=(255, 80,  80), thickness=2),
+                )
+
+                lm = results.pose_landmarks.landmark
+
+                def pt(idx):
+                    return [lm[idx].x, lm[idx].y]
+
+                # Right-side landmarks
+                shoulder = pt(12)
+                elbow    = pt(14)
+                wrist    = pt(16)
+                hip      = pt(24)
+                knee     = pt(26)
+
+                elbow_angle = calculate_angle(shoulder, elbow, wrist)
+                hip_angle   = calculate_angle(shoulder, hip, knee)
+                torque      = abs(elbow_angle - hip_angle)
+
+                elbow_history.append(elbow_angle)
+                torque_history.append(torque)
+
+                if elbow_angle > 165 and release_frame is None:
+                    release_frame = frame_index
+
+                cv2.putText(annotated, f"Elbow Angle: {int(elbow_angle)}",
+                            (30, 40),  cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                cv2.putText(annotated, f"Hip Torque:  {int(torque)}",
+                            (30, 80),  cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 100, 255), 2)
+                cv2.putText(annotated, f"Frame: {frame_index}",
+                            (30, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+
+            writer.write(annotated)
+            frame_index += 1
+
+            if total > 0:
+                bar.progress(
+                    min(frame_index / total, 1.0),
+                    text=f"Processing frame {frame_index}/{total}..."
+                )
+
+    cap.release()
+    writer.release()
+    bar.empty()
+
+    return elbow_history, torque_history, release_frame, frame_index
+
+# -----------------------------
+# MAIN APP LOGIC
+# -----------------------------
+
+if uploaded_video is not None:
 
     st.subheader("Video Analysis")
 
-    temp_file = tempfile.NamedTemporaryFile(delete=False)
-    temp_file.write(uploaded_video.read())
+    # FIX: Write temp file and CLOSE it before OpenCV reads it
+    suffix = os.path.splitext(uploaded_video.name)[1] or ".mp4"
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_in:
+        tmp_in.write(uploaded_video.read())
+        input_path = tmp_in.name
+    # File is now flushed and closed — safe for OpenCV
 
-    cap = cv2.VideoCapture(temp_file.name)
+    output_path = input_path.replace(suffix, "_annotated.mp4")
 
-    stframe = st.empty()
+    elbow_history, torque_history, release_frame, total_frames = \
+        process_video(input_path, output_path)
 
-    frame_index = 0
-    release_frame = None
+    if elbow_history is None:
+        st.error("Could not open the video file. Please try a different file.")
+        st.stop()
 
-    elbow_history = []
-    torque_history = []
+    # -----------------------------
+    # DISPLAY ANNOTATED VIDEO
+    # -----------------------------
 
-    while cap.isOpened():
+    st.success(f"Analysis complete — {total_frames} frames processed.")
 
-        ret, frame = cap.read()
+    # FIX: Display finished video file instead of slow frame-by-frame streaming
+    if os.path.exists(output_path):
+        with open(output_path, "rb") as vf:
+            st.video(vf.read())
+    else:
+        st.warning("Annotated video could not be saved.")
 
-        if not ret:
-            break
-
-        frame = cv2.resize(frame, (960, 540))
-
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-        results = pose.process(rgb)
-
-        if results.pose_landmarks:
-
-            mp_drawing.draw_landmarks(
-                frame,
-                results.pose_landmarks,
-                mp_pose.POSE_CONNECTIONS
-            )
-
-            landmarks = results.pose_landmarks.landmark
-
-            shoulder = [
-                landmarks[12].x,
-                landmarks[12].y
-            ]
-
-            elbow = [
-                landmarks[14].x,
-                landmarks[14].y
-            ]
-
-            wrist = [
-                landmarks[16].x,
-                landmarks[16].y
-            ]
-
-            hip = [
-                landmarks[24].x,
-                landmarks[24].y
-            ]
-
-            knee = [
-                landmarks[26].x,
-                landmarks[26].y
-            ]
-
-            elbow_angle = calculate_angle(
-                shoulder,
-                elbow,
-                wrist
-            )
-
-            hip_angle = calculate_angle(
-                shoulder,
-                hip,
-                knee
-            )
-
-            torque = abs(elbow_angle - hip_angle)
-
-            elbow_history.append(elbow_angle)
-            torque_history.append(torque)
-
-            if elbow_angle > 165 and release_frame is None:
-                release_frame = frame_index
-
-            cv2.putText(
-                frame,
-                f"Elbow Angle: {int(elbow_angle)}",
-                (30, 40),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (0, 255, 0),
-                2
-            )
-
-            cv2.putText(
-                frame,
-                f"Hip Torque: {int(torque)}",
-                (30, 80),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (255, 0, 0),
-                2
-            )
-
-        stframe.image(frame, channels="BGR")
-
-        frame_index += 1
-
-    cap.release()
-
-# -----------------------------
-# RESULTS
-# -----------------------------
-
-    st.success("Analysis Complete")
+    # -----------------------------
+    # RESULTS
+    # -----------------------------
 
     if release_frame is not None:
         st.write(f"Estimated Release Frame: {release_frame}")
+    else:
+        st.warning("Release frame not detected (elbow never exceeded 165 degrees).")
 
     if len(elbow_history) > 0:
 
-        avg_elbow = np.mean(elbow_history)
-        avg_torque = np.mean(torque_history)
+        avg_elbow  = float(np.mean(elbow_history))
+        avg_torque = float(np.mean(torque_history))
+        max_elbow  = float(np.max(elbow_history))
+        max_torque = float(np.max(torque_history))
 
-        st.subheader("📊 Throw Metrics")
+        st.subheader("Throw Metrics")
 
-        col1, col2 = st.columns(2)
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Avg Arm Extension", f"{int(avg_elbow)} deg")
+        col2.metric("Max Arm Extension", f"{int(max_elbow)} deg")
+        col3.metric("Avg Hip Torque",    f"{int(avg_torque)} deg")
+        col4.metric("Max Hip Torque",    f"{int(max_torque)} deg")
 
-        col1.metric(
-            "Average Arm Extension",
-            int(avg_elbow)
-        )
+        st.subheader("Angle History")
+        chart_col1, chart_col2 = st.columns(2)
+        with chart_col1:
+            st.caption("Elbow Angle per Frame")
+            st.line_chart(elbow_history)
+        with chart_col2:
+            st.caption("Hip Torque per Frame")
+            st.line_chart(torque_history)
 
-        col2.metric(
-            "Average Hip Torque",
-            int(avg_torque)
-        )
-
-        st.subheader("🏆 Coaching Feedback")
-
-        tips = coaching_feedback(
-            avg_elbow,
-            avg_torque
-        )
-
+        st.subheader("Coaching Feedback")
+        tips = coaching_feedback(avg_elbow, avg_torque)
         for tip in tips:
-            st.write("•", tip)
+            st.write("-", tip)
+
+    # Clean up temp files
+    try:
+        os.unlink(input_path)
+        os.unlink(output_path)
+    except Exception:
+        pass
 
 
 
