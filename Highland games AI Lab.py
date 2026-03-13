@@ -169,7 +169,7 @@ def gemini_coaching(api_key: str, frames_rgb: list, event_name: str) -> str:
     import google.generativeai as genai
 
     genai.configure(api_key=api_key, transport="rest")  # REST avoids gRPC header errors on Streamlit Cloud
-    model = genai.GenerativeModel("gemini-1.5-pro")
+    model = genai.GenerativeModel("gemini-2.0-flash")
 
     system_prompt = f"""You are an elite Highland Games coach and sports biomechanics expert
 with 20+ years experience coaching caber toss, hammer throw, weight-for-distance,
@@ -351,7 +351,7 @@ if uploaded_video is not None:
 
     # ── Step 4: Gemini coaching ───────────────────────────────────────────────
     if gemini_key and key_frames:
-        st.subheader("🏆 Gemini AI Coaching Feedback")
+        st.subheader("🏆 Gemini 2.0 Flash Coaching Feedback")
         event_label = event if event != "Auto-detect" else "Highland Games throw"
 
         with st.spinner("Gemini is analysing your throw…"):
