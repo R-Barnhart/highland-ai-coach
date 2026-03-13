@@ -1,10 +1,10 @@
-streamlit>=1.35.0
+streamlit
+opencv-python-headless
 mediapipe==0.10.14
-opencv-python-headless>=4.10.0
-openai>=1.35.0
-Pillow>=10.0.0
-numpy>=1.26.0
-google-generativeai
+Pillow
+numpy
+google-generativeai==0.7.2
+grpcio==1.60.0
 
 
 
