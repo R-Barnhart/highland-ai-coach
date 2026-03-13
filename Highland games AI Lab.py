@@ -51,7 +51,7 @@ LINE_COLOR = (0, 180, 255)   # sky-blue bones
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Highland Games AI Coach", layout="centered")
 
-st.title("🏴 Highland Games Throw Coach")
+st.title("🏴 Highland Games AI Throw Coach")
 st.write("Upload a throwing video to get a wireframe overlay and Gemini AI coaching feedback.")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -168,7 +168,7 @@ def gemini_coaching(api_key: str, frames_rgb: list, event_name: str) -> str:
     """Send annotated key frames to Gemini and return coaching text."""
     import google.generativeai as genai
 
-    genai.configure(api_key=api_key)
+    genai.configure(api_key=api_key, transport="rest")  # REST avoids gRPC header errors on Streamlit Cloud
     model = genai.GenerativeModel("gemini-1.5-pro")
 
     system_prompt = f"""You are an elite Highland Games coach and sports biomechanics expert
@@ -351,10 +351,10 @@ if uploaded_video is not None:
 
     # ── Step 4: Gemini coaching ───────────────────────────────────────────────
     if gemini_key and key_frames:
-        st.subheader("🏆 Coaching Feedback")
+        st.subheader("🏆 Gemini AI Coaching Feedback")
         event_label = event if event != "Auto-detect" else "Highland Games throw"
 
-        with st.spinner("Analysing your throw…"):
+        with st.spinner("Gemini is analysing your throw…"):
             try:
                 feedback = gemini_coaching(gemini_key, key_frames, event_label)
                 st.markdown(feedback)
@@ -377,5 +377,4 @@ if uploaded_video is not None:
             os.unlink(p)
         except Exception:
             pass
-
 
