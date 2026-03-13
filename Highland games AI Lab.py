@@ -43,7 +43,7 @@ LINE_COLOR = (0, 180, 255)
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Highland Games Throw Coach", layout="centered")
 
-st.title("🏴 Highland Games Throw Coach")
+st.title("🏴 Keystone Highlanders Throws Coach")
 st.write("Upload a throwing video to get a wireframe overlay and instant biomechanics coaching.")
 
 # ─────────────────────────────────────────────────────────────────────────────
