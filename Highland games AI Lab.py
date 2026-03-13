@@ -55,37 +55,39 @@ st.title("🏴 Highland Games AI Throw Coach")
 st.write("Upload a throwing video to get a wireframe overlay and Gemini AI coaching feedback.")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SIDEBAR — API key + event selector
+# SETTINGS — collapsed expander (click ⚙️ Settings to open)
 # ─────────────────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.header("⚙️ Settings")
+with st.expander("⚙️ Settings", expanded=False):
     gemini_key = st.text_input(
         "Gemini API Key",
         type="password",
         placeholder="AIza...",
-        help="Get yours at aistudio.google.com/app/apikey",
+        help="Get yours free at aistudio.google.com/app/apikey",
     )
     if gemini_key:
         st.success("API key saved ✓", icon="🔐")
 
-    st.divider()
-    event = st.selectbox("Highland Games Event", [
-        "Auto-detect",
-        "Caber Toss",
-        "Scottish Hammer Throw",
-        "Weight for Distance (light)",
-        "Weight for Distance (heavy)",
-        "Stone Put (Braemar)",
-        "Stone Put (Open)",
-        "Weight Over Bar",
-        "Sheaf Toss",
-    ])
+    col_a, col_b = st.columns(2)
+    with col_a:
+        event = st.selectbox("Highland Games Event", [
+            "Auto-detect",
+            "Caber Toss",
+            "Scottish Hammer Throw",
+            "Weight for Distance (light)",
+            "Weight for Distance (heavy)",
+            "Stone Put (Braemar)",
+            "Stone Put (Open)",
+            "Weight Over Bar",
+            "Sheaf Toss",
+        ])
+    with col_b:
+        num_frames = st.slider(
+            "Key frames sent to Gemini", 2, 6, 4,
+            help="Fewer frames = lower quota usage.",
+        )
 
-    st.divider()
-    num_frames = st.slider(
-        "Key frames sent to Gemini", 4, 10, 6,
-        help="More frames = richer analysis, slightly higher cost.",
-    )
+    st.caption("💡 Get a free Gemini API key at [aistudio.google.com](https://aistudio.google.com/app/apikey). "
+               "Enable billing for higher rate limits.")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FILE UPLOAD
@@ -137,10 +139,11 @@ def draw_13_landmarks(frame_bgr: np.ndarray, landmarks, w: int, h: int) -> np.nd
     """
     canvas = frame_bgr.copy()
 
-    # Scale sizes to ~1% of the frame diagonal for natural fit
+    # Scale sizes to frame diagonal — kept deliberately small so dots
+    # sit precisely on the joint rather than swamping it
     diag       = (w ** 2 + h ** 2) ** 0.5
-    dot_radius = max(4, int(diag * 0.011))
-    line_thick = max(2, int(diag * 0.005))
+    dot_radius = max(2, int(diag * 0.005))   # ~3-4 px on 720p
+    line_thick = max(1, int(diag * 0.003))   # ~2 px on 720p
 
     # Build pixel-coord dict — only include joints MediaPipe is confident about
     coords = {}
@@ -156,10 +159,10 @@ def draw_13_landmarks(frame_bgr: np.ndarray, landmarks, w: int, h: int) -> np.nd
         if a in coords and b in coords:
             cv2.line(canvas, coords[a], coords[b], LINE_COLOR, line_thick, cv2.LINE_AA)
 
-    # Draw joint dots on top with thin black outline for contrast
+    # Draw joint dots on top — thin black ring for contrast, filled green centre
     for idx, pt in coords.items():
-        cv2.circle(canvas, pt, dot_radius + 2, (0, 0, 0),   -1, cv2.LINE_AA)  # shadow
-        cv2.circle(canvas, pt, dot_radius,     DOT_COLOR,   -1, cv2.LINE_AA)  # fill
+        cv2.circle(canvas, pt, dot_radius + 1, (0, 0, 0), 1,  cv2.LINE_AA)  # outline
+        cv2.circle(canvas, pt, dot_radius,     DOT_COLOR, -1, cv2.LINE_AA)  # fill
 
     return canvas
 
@@ -172,23 +175,73 @@ def gemini_coaching(api_key: str, frames_rgb: list, event_name: str) -> str:
     model = genai.GenerativeModel("gemini-2.0-flash")
 
     system_prompt = f"""You are an elite Highland Games coach and sports biomechanics expert
-with 20+ years experience coaching caber toss, hammer throw, weight-for-distance,
-stone put, sheaf toss, and weight-over-bar events.
+with 20+ years of competition and coaching experience across all Highland Games throwing events.
 
-You will receive {len(frames_rgb)} sequential key frames from a throw video.
-Each frame has a 13-point pose wireframe overlaid (green dots = joints, blue lines = skeleton).
-The 13 joints are: nose, both shoulders, elbows, wrists, hips, knees, and ankles.
+You are analysing {len(frames_rgb)} sequential key frames from a throw video.
+Each frame shows a 13-point wireframe overlay (green dots = joints, blue lines = skeleton).
+The 13 tracked joints are: nose, both shoulders, elbows, wrists, hips, knees, and ankles.
 
-Analyse this **{event_name}** throw and structure your response with these sections:
+Your job is to give the thrower SPECIFIC, ACTIONABLE feedback that will directly add distance
+to their throw. Study the skeleton positions carefully across all frames before writing.
 
-**Event Identified** — name the event based on visual cues.
-**Phase Breakdown** — setup/wind-up → power phase → release → follow-through.
-**Biomechanics** — hip-shoulder separation, foot placement, arm path, spine angle, head position.
-**Strengths** — what the athlete is doing well (be specific, reference the skeleton).
-**Top 3 Improvements** — the highest-impact coaching cues for more distance.
-**Recommended Drills** — 2-3 targeted drills to fix the weaknesses identified.
+Structure your response exactly as follows:
 
-Be direct, technically precise, and encouraging."""
+---
+
+## 🎯 Event Identified
+State the event name and what visual cues confirmed it.
+
+---
+
+## 📽️ Phase-by-Phase Breakdown
+Walk through each throw phase visible in the frames:
+- **Setup / Stance** — foot width, weight distribution, grip position
+- **Wind-up / Approach** — rotation speed, counter-movement, implement path
+- **Power Phase** — hip drive, leg push, trunk rotation sequence
+- **Release Point** — arm extension, release angle, hand position at release
+- **Follow-through** — balance, recovery, foul-line control
+
+For each phase, reference what the skeleton shows (e.g. "the left hip landmark leads the shoulder by X frames, indicating good separation").
+
+---
+
+## ⚙️ Biomechanics Analysis
+Analyse these specific factors and score each as ✅ Good / ⚠️ Needs Work / ❌ Issue:
+- **Hip-Shoulder Separation** — is the hip rotating before the shoulder?
+- **Foot Placement & Base** — width, toe angle, heel lift timing
+- **Arm Path & Extension** — is the throwing arm fully extended at release?
+- **Spine Angle** — upright vs. optimal lean for the event
+- **Head & Eye Line** — is the head staying neutral or pulling early?
+- **Release Angle** — is the implement leaving at the optimal angle for distance?
+
+---
+
+## 💪 What You're Doing Well
+List 2-3 genuine strengths visible in the skeleton. Be specific — reference actual joint positions or timing you can see in the frames.
+
+---
+
+## 🚀 Top 3 Changes to Add Distance RIGHT NOW
+These must be the highest-ROI fixes — the changes that will add the most distance fastest:
+
+1. **[Fix name]** — What is wrong, exactly what to change, and why it will add distance.
+2. **[Fix name]** — What is wrong, exactly what to change, and why it will add distance.
+3. **[Fix name]** — What is wrong, exactly what to change, and why it will add distance.
+
+---
+
+## 🏋️ Recommended Drills
+Provide 2-3 targeted drills that directly address the weaknesses you identified:
+- **Drill name** — How to perform it, sets/reps, and which fault it corrects.
+
+---
+
+## 📏 Distance Potential Summary
+Give a plain-English summary: "Based on what I see, the biggest distance leak is X. Fix that first and you should see immediate improvement. Secondary gains will come from Y and Z."
+
+---
+
+Be direct, technically precise, and encouraging. Assume the athlete is serious about improving."""
 
     # Build content parts: text prompt then alternating label + image
     parts = [system_prompt]
@@ -295,7 +348,7 @@ def process_video(input_path: str, raw_out: str, key_indices: set):
 if uploaded_video is not None:
 
     if not gemini_key:
-        st.warning("⚠️  Enter your Gemini API key in the sidebar to enable AI coaching.")
+        st.warning("⚠️  Open **⚙️ Settings** above and enter your Gemini API key to enable AI coaching.")
 
     suffix = os.path.splitext(uploaded_video.name)[1] or ".mp4"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -366,10 +419,24 @@ if uploaded_video is not None:
                     mime="text/plain",
                 )
             except Exception as e:
-                st.error(f"Gemini error: {e}")
+                err = str(e)
+                if "429" in err or "quota" in err.lower() or "rate" in err.lower():
+                    import re
+                    wait = re.search(r'retry.*?(\d+)s', err, re.IGNORECASE)
+                    wait_msg = f" Please wait **{wait.group(1)} seconds** then try again." if wait else ""
+                    st.error(
+                        "⏱️ **Gemini free-tier quota exceeded.**" + wait_msg + "\n\n"
+                        "**Quick fixes:**\n"
+                        "- Reduce the *Key frames* slider to **2**\n"
+                        "- Wait a minute and retry\n"
+                        "- [Enable billing](https://ai.google.dev/gemini-api/docs/rate-limits) "
+                        "on your Google AI account for higher limits"
+                    )
+                else:
+                    st.error(f"Gemini error: {e}")
 
     elif not gemini_key:
-        st.info("Add your Gemini API key in the sidebar to get AI coaching feedback.")
+        st.info("Open **⚙️ Settings** above and add your Gemini API key to get AI coaching feedback.")
 
     # ── Cleanup ───────────────────────────────────────────────────────────────
     for p in [input_path, raw_path, web_path]:
@@ -377,4 +444,3 @@ if uploaded_video is not None:
             os.unlink(p)
         except Exception:
             pass
-
