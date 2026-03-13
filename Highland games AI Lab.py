@@ -44,8 +44,7 @@ KEY_CONNECTIONS = [
 
 DOT_COLOR  = (0, 255, 120)   # bright green joints
 LINE_COLOR = (0, 180, 255)   # sky-blue bones
-DOT_RADIUS = 6
-LINE_THICK = 3
+# Sizes are computed dynamically per frame — see draw_13_landmarks()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG
@@ -131,25 +130,36 @@ def pick_frame_indices(total: int, n: int) -> list:
 
 
 def draw_13_landmarks(frame_bgr: np.ndarray, landmarks, w: int, h: int) -> np.ndarray:
-    """Draw only the 13 key joints and their connections onto frame_bgr."""
+    """Draw only the 13 key joints and their connections onto frame_bgr.
+
+    Dot radius and line thickness scale with frame diagonal so markers
+    look proportional on any resolution — not too big, not too small.
+    """
     canvas = frame_bgr.copy()
 
-    # Build pixel-coord dict for key landmarks only
+    # Scale sizes to ~1% of the frame diagonal for natural fit
+    diag       = (w ** 2 + h ** 2) ** 0.5
+    dot_radius = max(4, int(diag * 0.011))
+    line_thick = max(2, int(diag * 0.005))
+
+    # Build pixel-coord dict — only include joints MediaPipe is confident about
     coords = {}
     for idx in KEY_LANDMARK_IDS:
         lm = landmarks.landmark[idx]
-        if lm.visibility > 0.25:           # skip occluded joints
-            coords[idx] = (int(lm.x * w), int(lm.y * h))
+        if lm.visibility > 0.15:   # low threshold → keep more joints visible
+            x = int(np.clip(lm.x, 0.0, 1.0) * w)
+            y = int(np.clip(lm.y, 0.0, 1.0) * h)
+            coords[idx] = (x, y)
 
     # Draw bones first (behind dots)
     for a, b in KEY_CONNECTIONS:
         if a in coords and b in coords:
-            cv2.line(canvas, coords[a], coords[b], LINE_COLOR, LINE_THICK, cv2.LINE_AA)
+            cv2.line(canvas, coords[a], coords[b], LINE_COLOR, line_thick, cv2.LINE_AA)
 
-    # Draw joint dots on top
+    # Draw joint dots on top with thin black outline for contrast
     for idx, pt in coords.items():
-        cv2.circle(canvas, pt, DOT_RADIUS, DOT_COLOR, -1, cv2.LINE_AA)
-        cv2.circle(canvas, pt, DOT_RADIUS + 1, (0, 0, 0), 1, cv2.LINE_AA)  # subtle outline
+        cv2.circle(canvas, pt, dot_radius + 2, (0, 0, 0),   -1, cv2.LINE_AA)  # shadow
+        cv2.circle(canvas, pt, dot_radius,     DOT_COLOR,   -1, cv2.LINE_AA)  # fill
 
     return canvas
 
@@ -228,11 +238,11 @@ def process_video(input_path: str, raw_out: str, key_indices: set):
 
     with mp_pose.Pose(
         static_image_mode=False,
-        model_complexity=1,
+        model_complexity=2,          # most accurate landmark placement
         smooth_landmarks=True,
         enable_segmentation=False,
-        min_detection_confidence=0.3,
-        min_tracking_confidence=0.3,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5,
     ) as pose:
 
         while True:
@@ -240,15 +250,20 @@ def process_video(input_path: str, raw_out: str, key_indices: set):
             if not ret:
                 break
 
-            frame   = cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_AREA)
-            rgb     = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = pose.process(rgb)
+            # ── Run pose on the NATIVE resolution for best accuracy ──────────
+            rgb_native = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results    = pose.process(rgb_native)
 
-            annotated = frame.copy()
+            # ── Resize frame to display size AFTER detection ─────────────────
+            frame_display = cv2.resize(frame, (out_w, out_h), interpolation=cv2.INTER_AREA)
+            annotated     = frame_display.copy()
+
             if results.pose_landmarks:
                 landmarks_detected += 1
+                # Draw on the display-size frame; landmarks use normalised [0,1]
+                # coords so they map correctly to any output resolution
                 annotated = draw_13_landmarks(
-                    frame, results.pose_landmarks, out_w, out_h
+                    frame_display, results.pose_landmarks, out_w, out_h
                 )
 
             # Subtle frame counter
