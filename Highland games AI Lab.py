@@ -51,7 +51,7 @@ LINE_COLOR = (0, 180, 255)   # sky-blue bones
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Highland Games AI Coach", layout="centered")
 
-st.title("🏴 Highland Games AI Throw Coach")
+st.title("🏴 Highland Games Throw Coach")
 st.write("Upload a throwing video to get a wireframe overlay and Gemini AI coaching feedback.")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -238,7 +238,7 @@ def process_video(input_path: str, raw_out: str, key_indices: set):
 
     with mp_pose.Pose(
         static_image_mode=False,
-        model_complexity=2,          # most accurate landmark placement
+        model_complexity=1,          # bundled lite model — no download needed on Streamlit Cloud
         smooth_landmarks=True,
         enable_segmentation=False,
         min_detection_confidence=0.5,
@@ -351,7 +351,7 @@ if uploaded_video is not None:
 
     # ── Step 4: Gemini coaching ───────────────────────────────────────────────
     if gemini_key and key_frames:
-        st.subheader("🏆 Gemini AI Coaching Feedback")
+        st.subheader("🏆 Coaching Feedback")
         event_label = event if event != "Auto-detect" else "Highland Games throw"
 
         with st.spinner("Gemini is analysing your throw…"):
