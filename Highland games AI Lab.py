@@ -43,7 +43,7 @@ LINE_COLOR = (0, 180, 255)
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Highland Games Throw Coach", layout="centered")
 
-st.title("🏴 Keystone Highlanders Throws Coach")
+st.title("🏴 Highland Games Throw Coach")
 st.write("Upload a throwing video to get a wireframe overlay and instant biomechanics coaching.")
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -444,8 +444,8 @@ def pick_frame_indices(total: int, n: int) -> list:
 def draw_13_landmarks(frame_bgr, landmarks, w, h):
     canvas     = frame_bgr.copy()
     diag       = (w ** 2 + h ** 2) ** 0.5
-    dot_radius = max(2, int(diag * 0.005))
-    line_thick = max(1, int(diag * 0.003))
+    dot_radius = max(1, int(diag * 0.0025))
+    line_thick = max(1, int(diag * 0.002))
 
     coords = {}
     for idx in KEY_LANDMARK_IDS:
