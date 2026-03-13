@@ -354,7 +354,7 @@ if uploaded_video is not None:
         st.subheader("🏆 Coaching Feedback")
         event_label = event if event != "Auto-detect" else "Highland Games throw"
 
-        with st.spinner("Gemini is analysing your throw…"):
+        with st.spinner("Analysing your throw…"):
             try:
                 feedback = gemini_coaching(gemini_key, key_frames, event_label)
                 st.markdown(feedback)
